@@ -1,41 +1,32 @@
-SESSION NAME:	-TEMPLATE-.recovered
+SESSION NAME:	5
 SAMPLE RATE:	48000.000000
 BIT DEPTH:	24-bit
-SESSION START TIMECODE:	23:59:54:24.00
+SESSION START TIMECODE:	00:00:00:00
 TIMECODE FORMAT:	25 Frame
 # OF AUDIO TRACKS:	11
-# OF AUDIO CLIPS:	11
-# OF AUDIO FILES:	7
+# OF AUDIO CLIPS:	8
+# OF AUDIO FILES:	1
 
 
 O N L I N E  F I L E S  I N  S E S S I O N
-Filename        	Location
-AAF_REF.wav     	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-VOBU.wav        	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-final.wav       	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-match_clip_1.wav	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-match_clip_3.wav	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-final.1.wav     	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
-final (1).wav   	MacOS:Users:chris:Desktop:-TEMPLATE-:Audio Files:
+Filename     	Location
+RECORD_35.wav	TB:5:Audio Files:
 
 
 O F F L I N E  F I L E S  I N  S E S S I O N
-Filename        	Location
+Filename     	Location
 
 
 O N L I N E  C L I P S  I N  S E S S I O N
 CLIP NAME   	Source File
-AAF_REF     	AAF_REF.wav
-AAF_REF-02  	AAF_REF.wav
-VOBU        	VOBU.wav
-clip_1_ref  	AAF_REF.wav
-clip_2_ref  	AAF_REF.wav
-clip_3_ref  	AAF_REF.wav
-final       	final.wav
-final (1)   	final (1).wav
-final-01    	final.1.wav
-match_clip_1	match_clip_1.wav
-match_clip_3	match_clip_3.wav
+1           	RECORD_35.wav
+2           	RECORD_35.wav
+3           	RECORD_35.wav
+RECORD_35   	RECORD_35.wav
+RECORD_35-01	RECORD_35.wav
+RECORD_35-02	RECORD_35.wav
+RECORD_35-03	RECORD_35.wav
+RECORD_35-05	RECORD_35.wav
 
 
 P L U G - I N S  L I S T I N G
@@ -71,8 +62,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: SoloSafe 
 PLUG-INS: 
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
-1       	1       	final (1)                     	00:00:00:00.72	00:00:22:05.72	00:00:22:05.00	    00:00:00:00.00	Unmuted
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 TRACK NAME:	RECORD 2
@@ -80,7 +70,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden SoloSafe 
 PLUG-INS: 
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 TRACK NAME:	COMP
@@ -88,10 +78,10 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: 
 PLUG-INS: 	UADx 610-B Preamp and EQ (mono)	Claro (mono)	Voca (mono)	RX 11 De-ess (mono)	KClip3 (mono)	WLM Plus (mono)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
-1       	1       	clip_1_ref                    	00:00:01:04.30	00:00:06:21.87	00:00:05:17.57	    00:00:01:04.30	Unmuted
-1       	2       	clip_2_ref                    	00:00:07:04.77	00:00:12:09.08	00:00:05:04.31	    00:00:14:02.00	Unmuted
-1       	3       	clip_3_ref                    	00:00:14:17.96	00:00:22:05.72	00:00:07:12.76	    00:00:08:08.00	Unmuted
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
+1       	1       	1                             	   00:00:05:13	   00:00:08:21	   00:00:03:07	Unmuted
+1       	2       	2                             	   00:00:11:04	   00:00:15:10	   00:00:04:05	Unmuted
+1       	3       	3                             	   00:00:16:20	   00:00:21:15	   00:00:04:20	Unmuted
 
 
 TRACK NAME:	COMP 2
@@ -99,7 +89,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden 
 PLUG-INS: 	UADx 610-B Preamp and EQ (mono)	Claro (mono)	Voca (mono)	RX 11 De-ess (mono)	KClip3 (mono)	WLM Plus (mono)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 TRACK NAME:	OFFSET (Stereo)
@@ -107,7 +97,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden 
 PLUG-INS: 
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
@@ -117,7 +107,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: 
 PLUG-INS: 	Dyn3 Compressor/Limiter (stereo)	KClip3 (stereo)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
@@ -127,7 +117,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: 
 PLUG-INS: 	Dyn3 Compressor/Limiter (stereo)	KClip3 (stereo)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
@@ -137,7 +127,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden 
 PLUG-INS: 	KClip3 (mono)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 TRACK NAME:	STEREO (Stereo)
@@ -145,7 +135,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden 
 PLUG-INS: 	KClip3 (stereo)
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
@@ -155,7 +145,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: 
 PLUG-INS: 
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
@@ -165,7 +155,7 @@ COMMENTS:
 USER DELAY:	0 Samples
 STATE: Hidden SoloSafe 
 PLUG-INS: 
-CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	TIMESTAMP         	STATE
+CHANNEL 	EVENT   	CLIP NAME                     	START TIME    	END TIME      	DURATION      	STATE
 
 
 
