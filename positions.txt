@@ -1,4 +1,0 @@
-RECORD_35-04.wav → 3.17075 sec
-RECORD_35-07.wav → 5.472375 sec
-RECORD_35-06.wav → 6.548875 sec
-RECORD_35-02.wav → 6.613125 sec
