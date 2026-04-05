@@ -74,7 +74,8 @@ def resolve_job_root() -> Path:
 
 
 def sanitise_name(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
+    return cleaned or "job"
 
 
 def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
@@ -97,6 +98,21 @@ def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
         f"Missing reference clip for '{clip_name}'. Tried: "
         + ", ".join(str(p.name) for p in candidates)
     )
+
+
+def detect_job_label(base: Path) -> str:
+    aaf_files = sorted(base.glob("*.aaf"))
+    if aaf_files:
+        return sanitise_name(aaf_files[0].stem)
+
+    txt_files = sorted(
+        p for p in base.glob("*.txt")
+        if p.name.lower() != "positions.txt"
+    )
+    if txt_files:
+        return sanitise_name(txt_files[0].stem)
+
+    return sanitise_name(base.name)
 
 
 def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool):
@@ -125,6 +141,7 @@ def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool
 
 def main():
     base = resolve_job_root()
+    job_label = detect_job_label(base)
 
     vo_path = base / "audio" / "VOBU_48k.wav"
     ref_dir = base / "clips"
@@ -133,12 +150,12 @@ def main():
     deliver_dir = base / "deliverables"
     positions_path = base / "positions.txt"
 
-    final_path = out_dir / "final.wav"
-    report_path = out_dir / "report.json"
-    summary_path = out_dir / "summary.txt"
+    final_path = out_dir / f"{job_label}_final.wav"
+    report_path = out_dir / f"{job_label}_report.json"
+    summary_path = out_dir / f"{job_label}_summary.txt"
 
-    deliver_final_path = deliver_dir / "final.wav"
-    deliver_summary_path = deliver_dir / "summary.txt"
+    deliver_final_path = deliver_dir / f"{job_label}_final.wav"
+    deliver_summary_path = deliver_dir / f"{job_label}_summary.txt"
 
     if not vo_path.exists():
         raise FileNotFoundError(f"Missing VO file: {vo_path}")
