@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -59,8 +60,8 @@ def load_positions(path: Path):
             if len(parts) != 3:
                 raise ValueError(f"Bad line in positions.txt: {line}")
 
-            ref_name, start_tc, end_tc = parts
-            clips.append((ref_name, start_tc, end_tc))
+            clip_name, start_tc, end_tc = parts
+            clips.append((clip_name, start_tc, end_tc))
 
     return clips
 
@@ -69,6 +70,32 @@ def resolve_job_root() -> Path:
     if len(sys.argv) > 1:
         return Path(sys.argv[1]).resolve()
     return Path(__file__).resolve().parent.parent
+
+
+def sanitise_name(name: str) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]+', "_", name).strip("_")
+
+
+def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
+    candidates = [
+        ref_dir / f"{clip_name}.wav",
+        ref_dir / f"{clip_name}_ref.wav",
+        ref_dir / f"clip_{clip_name}.wav",
+        ref_dir / f"clip_{clip_name}_ref.wav",
+        ref_dir / f"{sanitise_name(clip_name)}.wav",
+        ref_dir / f"{sanitise_name(clip_name)}_ref.wav",
+        ref_dir / f"clip_{sanitise_name(clip_name)}.wav",
+        ref_dir / f"clip_{sanitise_name(clip_name)}_ref.wav",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    raise FileNotFoundError(
+        f"Missing reference clip for '{clip_name}'. Tried: "
+        + ", ".join(str(p.name) for p in candidates)
+    )
 
 
 def main():
@@ -107,14 +134,12 @@ def main():
     report = []
     failed = False
 
-    for i, (ref_name, start_tc, end_tc) in enumerate(clips, start=1):
-        ref_path = ref_dir / ref_name
-        if not ref_path.exists():
-            raise FileNotFoundError(f"Missing reference clip: {ref_path}")
+    for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
+        ref_path = find_reference_clip(ref_dir, clip_name)
 
         ref_clip, ref_sr = librosa.load(str(ref_path), sr=SR)
         if ref_sr != SR:
-            raise ValueError(f"Reference clip must be {SR} Hz: {ref_name}")
+            raise ValueError(f"Reference clip must be {SR} Hz: {ref_path.name}")
 
         match_start, confidence = match_clip(vo, ref_clip)
 
@@ -129,7 +154,7 @@ def main():
             padded[:len(vo_clip)] = vo_clip
             vo_clip = padded
 
-        preview_path = check_dir / f"match_clip_{i}.wav"
+        preview_path = check_dir / f"match_{sanitise_name(clip_name)}.wav"
         sf.write(str(preview_path), vo_clip[:target_len], SR)
 
         status = "ok"
@@ -142,7 +167,8 @@ def main():
         report.append(
             {
                 "index": i,
-                "ref_name": ref_name,
+                "clip_name": clip_name,
+                "ref_name": ref_path.name,
                 "timeline_start_tc": start_tc,
                 "timeline_end_tc": end_tc,
                 "timeline_start_sec": round(out_start / SR, 6),
@@ -154,7 +180,7 @@ def main():
             }
         )
 
-        print(f"{ref_name} -> {match_start / SR:.6f}s | conf={confidence:.4f} | {status}")
+        print(f"{clip_name} -> {ref_path.name} -> {match_start / SR:.6f}s | conf={confidence:.4f} | {status}")
 
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

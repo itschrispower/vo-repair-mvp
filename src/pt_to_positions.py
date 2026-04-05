@@ -52,8 +52,6 @@ def main():
             if len(parts) < 6:
                 continue
 
-            # expected rows like:
-            # 1 1 1 00:00:05:13 00:00:08:21 00:00:03:07 Unmuted
             if not parts[0].isdigit() or not parts[1].isdigit():
                 continue
 
@@ -61,14 +59,10 @@ def main():
             start_tc = parts[3]
             end_tc = parts[4]
 
-            if clip_name not in {"1", "2", "3"}:
-                continue
-
-            ref_name = f"clip_{clip_name}_ref.wav"
             simple_start = tc_to_simple(start_tc)
             simple_end = tc_to_simple(end_tc)
 
-            lines_out.append(f"{ref_name} {simple_start} {simple_end}")
+            lines_out.append(f"{clip_name} {simple_start} {simple_end}")
 
     with open(out_file, "w", encoding="utf-8") as f:
         f.write("\n".join(lines_out) + ("\n" if lines_out else ""))
