@@ -1,2 +1,5 @@
 streamlit
 numpy
+librosa
+soundfile
+scipy
