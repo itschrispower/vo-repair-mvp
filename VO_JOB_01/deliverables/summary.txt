@@ -1,0 +1,27 @@
+VO REPAIR SUMMARY
+
+Clip 1 — OK
+Name: 1
+Ref: clip_1_ref.wav
+Placed: 05.13 to 08.21
+Matched in VOBU at: 1.831229s
+Confidence: 0.9279
+Preview: match_check/match_1.wav
+
+Clip 2 — OK
+Name: 2
+Ref: clip_2_ref.wav
+Placed: 11.04 to 15.10
+Matched in VOBU at: 7.472771s
+Confidence: 0.8719
+Preview: match_check/match_2.wav
+
+Clip 3 — OK
+Name: 3
+Ref: clip_3_ref.wav
+Placed: 16.20 to 21.15
+Matched in VOBU at: 13.096771s
+Confidence: 0.9177
+Preview: match_check/match_3.wav
+
+Final output written: /workspaces/vo-repair-mvp/VO_JOB_01/rebuild_audio/final.wav
