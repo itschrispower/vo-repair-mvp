@@ -3,7 +3,6 @@ import sys
 import re
 
 def tc_to_simple(tc):
-    # 00:00:01:04.30 → 01.04
     parts = tc.split(":")
     sec = int(parts[2])
     frame = int(parts[3].split(".")[0])
