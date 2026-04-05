@@ -8,7 +8,7 @@ Matched in VOBU at: 1.831229s
 Confidence: 0.9279
 Preview: match_check/match_1.wav
 
-Clip 2 — OK
+Clip 2 — REVIEW
 Name: 2
 Ref: clip_2_ref.wav
 Placed: 11.04 to 15.10

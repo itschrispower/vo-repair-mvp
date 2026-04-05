@@ -9,7 +9,8 @@ import numpy as np
 import soundfile as sf
 
 SR = 48000
-MIN_CONFIDENCE = 0.60
+FAIL_THRESHOLD = 0.75
+REVIEW_THRESHOLD = 0.90
 
 
 def tc_to_seconds(tc: str) -> float:
@@ -205,12 +206,15 @@ def main():
         preview_path = check_dir / f"match_{sanitise_name(clip_name)}.wav"
         sf.write(str(preview_path), vo_clip[:target_len], SR)
 
-        status = "ok"
-        if confidence < MIN_CONFIDENCE:
-            status = "low_confidence"
-            failed = True
-        else:
+        if confidence >= REVIEW_THRESHOLD:
+            status = "ok"
             output[out_start:out_end] = vo_clip[:target_len]
+        elif confidence >= FAIL_THRESHOLD:
+            status = "review"
+            output[out_start:out_end] = vo_clip[:target_len]
+        else:
+            status = "fail"
+            failed = True
 
         item = {
             "index": i,
@@ -229,7 +233,7 @@ def main():
 
         print(
             f"{clip_name} -> {ref_path.name} -> "
-            f"{match_start / SR:.6f}s | conf={confidence:.4f} | {status}"
+            f"{match_start / SR:.6f}s | conf={confidence:.4f} | {status.upper()}"
         )
 
     with open(report_path, "w", encoding="utf-8") as f:
@@ -241,7 +245,7 @@ def main():
     write_summary(summary_path, report, final_path, failed)
 
     if failed:
-        print("STOPPED: one or more clips were low confidence")
+        print("STOPPED: one or more clips failed validation")
         print(report_path)
         print(summary_path)
         return
