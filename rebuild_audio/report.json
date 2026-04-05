@@ -1,0 +1,38 @@
+[
+  {
+    "index": 1,
+    "ref_name": "clip_1_ref.wav",
+    "timeline_start_tc": "05.16",
+    "timeline_end_tc": "08.11",
+    "timeline_start_sec": 5.64,
+    "timeline_end_sec": 8.44,
+    "source_match_sec": 2.004375,
+    "confidence": 0.910715,
+    "status": "ok",
+    "output_preview": "match_check/match_clip_1.wav"
+  },
+  {
+    "index": 2,
+    "ref_name": "clip_2_ref.wav",
+    "timeline_start_tc": "10.03",
+    "timeline_end_tc": "13.23",
+    "timeline_start_sec": 10.119979,
+    "timeline_end_sec": 13.92,
+    "source_match_sec": 13.226771,
+    "confidence": 0.915282,
+    "status": "ok",
+    "output_preview": "match_check/match_clip_2.wav"
+  },
+  {
+    "index": 3,
+    "ref_name": "clip_3_ref.wav",
+    "timeline_start_tc": "15.13",
+    "timeline_end_tc": "20.00",
+    "timeline_start_sec": 15.52,
+    "timeline_end_sec": 20.0,
+    "source_match_sec": 7.216,
+    "confidence": 0.767253,
+    "status": "ok",
+    "output_preview": "match_check/match_clip_3.wav"
+  }
+]
