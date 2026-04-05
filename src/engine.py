@@ -2,6 +2,7 @@ import json
 import re
 import sys
 from pathlib import Path
+import shutil
 
 import librosa
 import numpy as np
@@ -105,13 +106,10 @@ def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool
     lines.append("")
 
     for item in report:
-        label = f"Clip {item['index']} — {item['status'].upper()}"
-        lines.append(label)
+        lines.append(f"Clip {item['index']} — {item['status'].upper()}")
         lines.append(f"Name: {item['clip_name']}")
         lines.append(f"Ref: {item['ref_name']}")
-        lines.append(
-            f"Placed: {item['timeline_start_tc']} to {item['timeline_end_tc']}"
-        )
+        lines.append(f"Placed: {item['timeline_start_tc']} to {item['timeline_end_tc']}")
         lines.append(f"Matched in VOBU at: {item['source_match_sec']:.6f}s")
         lines.append(f"Confidence: {item['confidence']:.4f}")
         lines.append(f"Preview: {item['output_preview']}")
@@ -132,11 +130,15 @@ def main():
     ref_dir = base / "clips"
     out_dir = base / "rebuild_audio"
     check_dir = base / "match_check"
+    deliver_dir = base / "deliverables"
     positions_path = base / "positions.txt"
 
     final_path = out_dir / "final.wav"
     report_path = out_dir / "report.json"
     summary_path = out_dir / "summary.txt"
+
+    deliver_final_path = deliver_dir / "final.wav"
+    deliver_summary_path = deliver_dir / "summary.txt"
 
     if not vo_path.exists():
         raise FileNotFoundError(f"Missing VO file: {vo_path}")
@@ -155,6 +157,7 @@ def main():
 
     out_dir.mkdir(exist_ok=True)
     check_dir.mkdir(exist_ok=True)
+    deliver_dir.mkdir(exist_ok=True)
 
     max_end = max(tc_to_samples(end_tc) for _, _, end_tc in clips)
     output = np.zeros(max_end, dtype=np.float32)
@@ -226,10 +229,15 @@ def main():
         print(summary_path)
         return
 
+    shutil.copy2(final_path, deliver_final_path)
+    shutil.copy2(summary_path, deliver_summary_path)
+
     print("DONE")
     print(final_path)
     print(report_path)
     print(summary_path)
+    print(deliver_final_path)
+    print(deliver_summary_path)
 
 
 if __name__ == "__main__":
