@@ -8,7 +8,7 @@
     "timeline_start_sec": 5.52,
     "timeline_end_sec": 8.84,
     "source_match_sec": 1.831229,
-    "confidence": 0.927885,
+    "confidence": 0.927884,
     "status": "ok",
     "output_preview": "match_check/match_1.wav"
   },
@@ -34,7 +34,7 @@
     "timeline_start_sec": 16.8,
     "timeline_end_sec": 21.6,
     "source_match_sec": 13.096771,
-    "confidence": 0.917672,
+    "confidence": 0.917671,
     "status": "ok",
     "output_preview": "match_check/match_3.wav"
   }
