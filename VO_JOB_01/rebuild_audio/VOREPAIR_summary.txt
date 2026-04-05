@@ -24,4 +24,4 @@ Matched in VOBU at: 13.096771s
 Confidence: 0.9177
 Preview: match_check/match_3.wav
 
-Final output written: /workspaces/vo-repair-mvp/VO_JOB_01/rebuild_audio/final.wav
+Final output written: /workspaces/vo-repair-mvp/VO_JOB_01/rebuild_audio/VOREPAIR_final.wav
