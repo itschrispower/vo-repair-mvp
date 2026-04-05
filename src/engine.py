@@ -73,7 +73,7 @@ def resolve_job_root() -> Path:
 
 
 def sanitise_name(name: str) -> str:
-    return re.sub(r'[^A-Za-z0-9._-]+', "_", name).strip("_")
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
 
 
 def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
@@ -98,6 +98,33 @@ def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
     )
 
 
+def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool):
+    lines = []
+
+    lines.append("VO REPAIR SUMMARY")
+    lines.append("")
+
+    for item in report:
+        label = f"Clip {item['index']} — {item['status'].upper()}"
+        lines.append(label)
+        lines.append(f"Name: {item['clip_name']}")
+        lines.append(f"Ref: {item['ref_name']}")
+        lines.append(
+            f"Placed: {item['timeline_start_tc']} to {item['timeline_end_tc']}"
+        )
+        lines.append(f"Matched in VOBU at: {item['source_match_sec']:.6f}s")
+        lines.append(f"Confidence: {item['confidence']:.4f}")
+        lines.append(f"Preview: {item['output_preview']}")
+        lines.append("")
+
+    if failed:
+        lines.append("Final output was NOT written because one or more clips failed validation.")
+    else:
+        lines.append(f"Final output written: {final_path}")
+
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main():
     base = resolve_job_root()
 
@@ -109,6 +136,7 @@ def main():
 
     final_path = out_dir / "final.wav"
     report_path = out_dir / "report.json"
+    summary_path = out_dir / "summary.txt"
 
     if not vo_path.exists():
         raise FileNotFoundError(f"Missing VO file: {vo_path}")
@@ -164,37 +192,44 @@ def main():
         else:
             output[out_start:out_end] = vo_clip[:target_len]
 
-        report.append(
-            {
-                "index": i,
-                "clip_name": clip_name,
-                "ref_name": ref_path.name,
-                "timeline_start_tc": start_tc,
-                "timeline_end_tc": end_tc,
-                "timeline_start_sec": round(out_start / SR, 6),
-                "timeline_end_sec": round(out_end / SR, 6),
-                "source_match_sec": round(match_start / SR, 6),
-                "confidence": round(confidence, 6),
-                "status": status,
-                "output_preview": str(preview_path.relative_to(base)),
-            }
-        )
+        item = {
+            "index": i,
+            "clip_name": clip_name,
+            "ref_name": ref_path.name,
+            "timeline_start_tc": start_tc,
+            "timeline_end_tc": end_tc,
+            "timeline_start_sec": round(out_start / SR, 6),
+            "timeline_end_sec": round(out_end / SR, 6),
+            "source_match_sec": round(match_start / SR, 6),
+            "confidence": round(confidence, 6),
+            "status": status,
+            "output_preview": str(preview_path.relative_to(base)),
+        }
+        report.append(item)
 
-        print(f"{clip_name} -> {ref_path.name} -> {match_start / SR:.6f}s | conf={confidence:.4f} | {status}")
+        print(
+            f"{clip_name} -> {ref_path.name} -> "
+            f"{match_start / SR:.6f}s | conf={confidence:.4f} | {status}"
+        )
 
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    if not failed:
+        sf.write(str(final_path), output, SR)
+
+    write_summary(summary_path, report, final_path, failed)
+
     if failed:
         print("STOPPED: one or more clips were low confidence")
         print(report_path)
+        print(summary_path)
         return
-
-    sf.write(str(final_path), output, SR)
 
     print("DONE")
     print(final_path)
     print(report_path)
+    print(summary_path)
 
 
 if __name__ == "__main__":
