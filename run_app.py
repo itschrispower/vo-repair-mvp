@@ -1,73 +1,30 @@
+import os
 import subprocess
-from pathlib import Path
 
-ROOT = Path(__file__).parent
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+def get_jobs():
+    return sorted([d for d in os.listdir(BASE_DIR) if d.startswith("VO_JOB")])
 
-def list_jobs():
-    return [p for p in ROOT.iterdir() if p.is_dir() and p.name.startswith("VO_JOB")]
+def run_job(job_name):
+    print(f"\nRunning job: {job_name}\n")
 
+    subprocess.run(["python3", "src/pt_to_positions.py", job_name], cwd=BASE_DIR)
+    subprocess.run(["python3", "src/engine.py", job_name], cwd=BASE_DIR)
 
-def choose_job(jobs):
-    print("\nAvailable jobs:\n")
-    for i, job in enumerate(jobs, 1):
-        print(f"{i}. {job.name}")
-
-    choice = input("\nSelect job number: ").strip()
-
-    if not choice.isdigit():
-        print("Invalid choice")
-        return None
-
-    idx = int(choice) - 1
-    if idx < 0 or idx >= len(jobs):
-        print("Invalid choice")
-        return None
-
-    return jobs[idx]
-
-
-def show_summary(job_path: Path):
-    deliverables = job_path / "deliverables"
-    summaries = sorted(deliverables.glob("*_summary.txt"))
-
-    if not summaries:
-        print("\nNo summary file found.")
-        return
-
-    summary_path = summaries[0]
-
-    print("\n" + "=" * 60)
-    print(f"SUMMARY: {summary_path.name}")
-    print("=" * 60)
-    print(summary_path.read_text(encoding="utf-8"))
-    print("=" * 60)
-
-
-def run_job(job_path: Path):
-    cmd = f"python3 src/run_job.py {job_path.name}"
-    result = subprocess.run(cmd, shell=True)
-
-    if result.returncode != 0:
-        print("\nJOB FAILED")
-        return
-
-    show_summary(job_path)
-
+    # OPEN DELIVERABLES IN FINDER
+    deliverables_path = os.path.join(BASE_DIR, job_name, "deliverables")
+    if os.path.exists(deliverables_path):
+        subprocess.run(["open", deliverables_path])
 
 def main():
-    jobs = list_jobs()
+    jobs = get_jobs()
 
     if not jobs:
-        print("No job folders found.")
+        print("No VO jobs found.")
         return
 
-    job = choose_job(jobs)
-    if not job:
-        return
-
-    run_job(job)
-
+    run_job(jobs[0])
 
 if __name__ == "__main__":
     main()
