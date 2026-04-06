@@ -14,6 +14,9 @@ REVIEW_THRESHOLD = 0.90
 
 
 def tc_to_seconds(tc: str) -> float:
+    if ":" in tc:
+        hh, mm, ss, ff = tc.split(":")
+        return int(ss) + (int(ff) / 25.0)
     secs, frames = tc.split(".")
     return int(secs) + (int(frames) / 25.0)
 
@@ -24,6 +27,8 @@ def tc_to_samples(tc: str) -> int:
 
 def norm(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32)
+    if x.size == 0:
+        return x
     x -= np.mean(x)
     peak = np.max(np.abs(x))
     if peak > 0:
@@ -38,67 +43,31 @@ def match_clip(full: np.ndarray, clip: np.ndarray) -> tuple[int, float]:
     corr = np.correlate(full_n, clip_n, mode="valid")
     match_start = int(np.argmax(corr))
 
-    matched_segment = full_n[match_start:match_start + len(clip_n)]
-    denom = np.linalg.norm(matched_segment) * np.linalg.norm(clip_n)
-
-    if denom == 0:
-        confidence = 0.0
-    else:
-        confidence = float(corr[match_start] / denom)
+    matched = full_n[match_start:match_start + len(clip_n)]
+    denom = np.linalg.norm(matched) * np.linalg.norm(clip_n)
+    confidence = 0.0 if denom == 0 else float(corr[match_start] / denom)
 
     return match_start, confidence
 
 
 def load_positions(path: Path):
     clips = []
-
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-
             parts = line.split()
             if len(parts) != 3:
                 raise ValueError(f"Bad line in positions.txt: {line}")
-
-            clip_name, start_tc, end_tc = parts
-            clips.append((clip_name, start_tc, end_tc))
-
+            name, start, end = parts
+            clips.append((name, start, end))
     return clips
-
-
-def resolve_job_root() -> Path:
-    if len(sys.argv) > 1:
-        return Path(sys.argv[1]).resolve()
-    return Path(__file__).resolve().parent.parent
 
 
 def sanitise_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
     return cleaned or "job"
-
-
-def find_reference_clip(ref_dir: Path, clip_name: str) -> Path:
-    candidates = [
-        ref_dir / f"{clip_name}.wav",
-        ref_dir / f"{clip_name}_ref.wav",
-        ref_dir / f"clip_{clip_name}.wav",
-        ref_dir / f"clip_{clip_name}_ref.wav",
-        ref_dir / f"{sanitise_name(clip_name)}.wav",
-        ref_dir / f"{sanitise_name(clip_name)}_ref.wav",
-        ref_dir / f"clip_{sanitise_name(clip_name)}.wav",
-        ref_dir / f"clip_{sanitise_name(clip_name)}_ref.wav",
-    ]
-
-    for p in candidates:
-        if p.exists():
-            return p
-
-    raise FileNotFoundError(
-        f"Missing reference clip for '{clip_name}'. Tried: "
-        + ", ".join(str(p.name) for p in candidates)
-    )
 
 
 def detect_job_label(base: Path) -> str:
@@ -116,9 +85,33 @@ def detect_job_label(base: Path) -> str:
     return sanitise_name(base.name)
 
 
+def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
+    audio, sr = sf.read(str(aaf_reference_path))
+    if sr != SR:
+        raise ValueError(f"aaf_reference.wav must be {SR} Hz, got {sr}")
+
+    auto_ref_dir.mkdir(exist_ok=True)
+    refs = {}
+
+    for clip_name, start_tc, end_tc in clips:
+        start = tc_to_samples(start_tc)
+        end = tc_to_samples(end_tc)
+
+        if start < 0 or end <= start or end > len(audio):
+            raise ValueError(
+                f"Clip {clip_name} falls outside aaf_reference.wav: {start_tc} -> {end_tc}"
+            )
+
+        clip_audio = audio[start:end]
+        out_path = auto_ref_dir / f"{sanitise_name(clip_name)}_auto_ref.wav"
+        sf.write(str(out_path), clip_audio, sr)
+        refs[clip_name] = out_path
+
+    return refs
+
+
 def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool):
     lines = []
-
     lines.append("VO REPAIR SUMMARY")
     lines.append("")
 
@@ -141,15 +134,20 @@ def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool
 
 
 def main():
-    base = resolve_job_root()
+    if len(sys.argv) < 2:
+        raise SystemExit("Usage: python3 src/engine.py <job_folder>")
+
+    base = Path(sys.argv[1]).resolve()
     job_label = detect_job_label(base)
 
     vo_path = base / "audio" / "VOBU_48k.wav"
-    ref_dir = base / "clips"
+    aaf_ref_path = base / "audio" / "aaf_reference.wav"
+    positions_path = base / "positions.txt"
+
     out_dir = base / "rebuild_audio"
     check_dir = base / "match_check"
+    auto_ref_dir = base / "auto_refs"
     deliver_dir = base / "deliverables"
-    positions_path = base / "positions.txt"
 
     final_path = out_dir / f"{job_label}_final.wav"
     report_path = out_dir / f"{job_label}_report.json"
@@ -160,22 +158,21 @@ def main():
 
     if not vo_path.exists():
         raise FileNotFoundError(f"Missing VO file: {vo_path}")
-
-    if not ref_dir.exists():
-        raise FileNotFoundError(f"Missing clips folder: {ref_dir}")
-
+    if not aaf_ref_path.exists():
+        raise FileNotFoundError(f"Missing aaf_reference.wav: {aaf_ref_path}")
     if not positions_path.exists():
         raise FileNotFoundError(f"Missing positions file: {positions_path}")
+
+    out_dir.mkdir(exist_ok=True)
+    check_dir.mkdir(exist_ok=True)
+    deliver_dir.mkdir(exist_ok=True)
 
     vo, vo_sr = librosa.load(str(vo_path), sr=SR)
     if vo_sr != SR:
         raise ValueError(f"VO file must be {SR} Hz")
 
     clips = load_positions(positions_path)
-
-    out_dir.mkdir(exist_ok=True)
-    check_dir.mkdir(exist_ok=True)
-    deliver_dir.mkdir(exist_ok=True)
+    auto_refs = build_auto_refs(aaf_ref_path, clips, auto_ref_dir)
 
     max_end = max(tc_to_samples(end_tc) for _, _, end_tc in clips)
     output = np.zeros(max_end, dtype=np.float32)
@@ -184,7 +181,7 @@ def main():
     failed = False
 
     for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
-        ref_path = find_reference_clip(ref_dir, clip_name)
+        ref_path = auto_refs[clip_name]
 
         ref_clip, ref_sr = librosa.load(str(ref_path), sr=SR)
         if ref_sr != SR:
@@ -263,3 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

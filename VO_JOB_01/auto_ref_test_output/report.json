@@ -2,40 +2,31 @@
   {
     "index": 1,
     "clip_name": "1",
-    "ref_name": "1_auto_ref.wav",
     "timeline_start_tc": "05.13",
     "timeline_end_tc": "08.21",
-    "timeline_start_sec": 5.52,
-    "timeline_end_sec": 8.84,
     "source_match_sec": 1.804521,
     "confidence": 0.927884,
     "status": "ok",
-    "output_preview": "match_check/match_1.wav"
+    "output_preview": "VO_JOB_01/auto_ref_test_output/match_check/match_1.wav"
   },
   {
     "index": 2,
     "clip_name": "2",
-    "ref_name": "2_auto_ref.wav",
     "timeline_start_tc": "11.04",
     "timeline_end_tc": "15.10",
-    "timeline_start_sec": 11.16,
-    "timeline_end_sec": 15.4,
     "source_match_sec": 7.444521,
     "confidence": 0.871871,
     "status": "review",
-    "output_preview": "match_check/match_2.wav"
+    "output_preview": "VO_JOB_01/auto_ref_test_output/match_check/match_2.wav"
   },
   {
     "index": 3,
     "clip_name": "3",
-    "ref_name": "3_auto_ref.wav",
     "timeline_start_tc": "16.20",
     "timeline_end_tc": "21.15",
-    "timeline_start_sec": 16.8,
-    "timeline_end_sec": 21.6,
     "source_match_sec": 13.084521,
     "confidence": 0.91767,
     "status": "ok",
-    "output_preview": "match_check/match_3.wav"
+    "output_preview": "VO_JOB_01/auto_ref_test_output/match_check/match_3.wav"
   }
 ]
