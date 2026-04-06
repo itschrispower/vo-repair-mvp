@@ -14,8 +14,11 @@ positions_path = job / "positions.txt"
 
 out_dir = job / "clip_output_test"
 clips_dir = out_dir / "clips"
+auto_refs_dir = out_dir / "auto_refs"
+
 out_dir.mkdir(exist_ok=True)
 clips_dir.mkdir(exist_ok=True)
+auto_refs_dir.mkdir(exist_ok=True)
 
 
 def tc_to_seconds(tc: str) -> float:
@@ -44,11 +47,14 @@ def norm(x: np.ndarray) -> np.ndarray:
 def match_clip(full: np.ndarray, clip: np.ndarray) -> tuple[int, float]:
     full_n = norm(full)
     clip_n = norm(clip)
+
     corr = np.correlate(full_n, clip_n, mode="valid")
     match_start = int(np.argmax(corr))
+
     matched = full_n[match_start:match_start + len(clip_n)]
     denom = np.linalg.norm(matched) * np.linalg.norm(clip_n)
     confidence = 0.0 if denom == 0 else float(corr[match_start] / denom)
+
     return match_start, confidence
 
 
@@ -69,12 +75,17 @@ def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
     if sr != SR:
         raise ValueError(f"aaf_reference.wav must be {SR} Hz, got {sr}")
 
-    auto_ref_dir.mkdir(exist_ok=True)
     refs = {}
 
     for clip_name, start_tc, end_tc in clips:
         start = tc_to_samples(start_tc)
         end = tc_to_samples(end_tc)
+
+        if start < 0 or end <= start or end > len(audio):
+            raise ValueError(
+                f"Clip {clip_name} falls outside aaf_reference.wav: {start_tc} -> {end_tc}"
+            )
+
         clip_audio = audio[start:end]
         out_path = auto_ref_dir / f"{clip_name}_auto_ref.wav"
         sf.write(str(out_path), clip_audio, sr)
@@ -88,7 +99,7 @@ if vo_sr != SR:
     raise ValueError(f"VO file must be {SR} Hz")
 
 clips = load_positions(positions_path)
-auto_refs = build_auto_refs(aaf_ref_path, clips, out_dir / "auto_refs")
+auto_refs = build_auto_refs(aaf_ref_path, clips, auto_refs_dir)
 
 manifest = []
 
@@ -116,14 +127,20 @@ for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
         {
             "index": i,
             "clip_name": clip_name,
-            "timeline_start_tc": start_tc,
-            "timeline_end_tc": end_tc,
-            "timeline_start_sec": round(out_start / SR, 6),
-            "timeline_end_sec": round(out_end / SR, 6),
-            "duration_sec": round(target_len / SR, 6),
-            "source_match_sec": round(match_start / SR, 6),
-            "confidence": round(confidence, 6),
+            "timeline": {
+                "start_tc": start_tc,
+                "end_tc": end_tc,
+                "start_sec": round(out_start / SR, 6),
+                "end_sec": round(out_end / SR, 6),
+                "duration_sec": round(target_len / SR, 6),
+            },
+            "source": {
+                "file": "VOBU_48k.wav",
+                "match_sec": round(match_start / SR, 6),
+                "duration_sec": round(target_len / SR, 6),
+            },
             "rebuilt_file": str(clip_out),
+            "confidence": round(confidence, 6),
         }
     )
 
