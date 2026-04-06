@@ -1,14 +1,17 @@
 import json
+import math
 import re
+import shutil
 import sys
 from pathlib import Path
-import shutil
 
+import aaf2
 import librosa
 import numpy as np
 import soundfile as sf
 
 SR = 48000
+FPS = 25.0
 FAIL_THRESHOLD = 0.75
 REVIEW_THRESHOLD = 0.90
 
@@ -16,13 +19,20 @@ REVIEW_THRESHOLD = 0.90
 def tc_to_seconds(tc: str) -> float:
     if ":" in tc:
         hh, mm, ss, ff = tc.split(":")
-        return int(ss) + (int(ff) / 25.0)
+        return int(ss) + (int(ff) / FPS)
     secs, frames = tc.split(".")
-    return int(secs) + (int(frames) / 25.0)
+    return int(secs) + (int(frames) / FPS)
 
 
 def tc_to_samples(tc: str) -> int:
-    return int(tc_to_seconds(tc) * SR)
+    return int(round(tc_to_seconds(tc) * SR))
+
+
+def seconds_to_tc(seconds: float) -> str:
+    total_frames = int(math.floor(seconds * FPS + 1e-9))
+    secs = total_frames // int(FPS)
+    frames = total_frames % int(FPS)
+    return f"{secs:02d}.{frames:02d}"
 
 
 def norm(x: np.ndarray) -> np.ndarray:
@@ -110,7 +120,7 @@ def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
     return refs
 
 
-def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool):
+def write_summary(path: Path, report: list[dict], final_path: Path, aaf_path: Path, failed: bool):
     lines = []
     lines.append("VO REPAIR SUMMARY")
     lines.append("")
@@ -122,15 +132,59 @@ def write_summary(path: Path, report: list[dict], final_path: Path, failed: bool
         lines.append(f"Placed: {item['timeline_start_tc']} to {item['timeline_end_tc']}")
         lines.append(f"Matched in VOBU at: {item['source_match_sec']:.6f}s")
         lines.append(f"Confidence: {item['confidence']:.4f}")
-        lines.append(f"Preview: {item['output_preview']}")
+        lines.append(f"Rebuilt clip: {item['rebuilt_file']}")
         lines.append("")
 
     if failed:
         lines.append("Final output was NOT written because one or more clips failed validation.")
+        lines.append("AAF output was NOT written.")
     else:
         lines.append(f"Final output written: {final_path}")
+        lines.append(f"AAF output written: {aaf_path}")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_embedded_aaf(manifest: list[dict], out_aaf: Path):
+    with aaf2.open(str(out_aaf), "w") as f:
+        comp = f.create.CompositionMob("VOREPAIR_REBUILT")
+        comp.usage = "Usage_TopLevel"
+        f.content.mobs.append(comp)
+
+        slot = comp.create_sound_slot(edit_rate=SR)
+        seq = slot.segment
+
+        current_pos = 0
+
+        for item in manifest:
+            timeline_start = int(item["timeline"]["start_samples"])
+            duration = int(item["timeline"]["duration_samples"])
+            rebuilt_file = Path(item["rebuilt_file"]).resolve()
+
+            if timeline_start > current_pos:
+                filler = f.create.Filler("sound")
+                filler.length = timeline_start - current_pos
+                seq.components.append(filler)
+                current_pos = timeline_start
+
+            mob_name = f"clip_{item['index']}_{item['clip_name']}"
+            master_mob = f.create.MasterMob(mob_name)
+            f.content.mobs.append(master_mob)
+
+            essence_slot = master_mob.import_audio_essence(str(rebuilt_file), SR)
+
+            src_clip = master_mob.create_source_clip(
+                slot_id=essence_slot.slot_id,
+                start=0,
+                length=duration,
+                media_kind="sound",
+            )
+            src_clip.length = duration
+
+            seq.components.append(src_clip)
+            current_pos += duration
+
+        f.save()
 
 
 def main():
@@ -147,14 +201,18 @@ def main():
     out_dir = base / "rebuild_audio"
     check_dir = base / "match_check"
     auto_ref_dir = base / "auto_refs"
+    rebuilt_clips_dir = out_dir / "rebuilt_clips"
     deliver_dir = base / "deliverables"
 
     final_path = out_dir / f"{job_label}_final.wav"
     report_path = out_dir / f"{job_label}_report.json"
     summary_path = out_dir / f"{job_label}_summary.txt"
+    manifest_path = out_dir / f"{job_label}_manifest.json"
+    aaf_path = out_dir / f"{job_label}_rebuilt.aaf"
 
     deliver_final_path = deliver_dir / f"{job_label}_final.wav"
     deliver_summary_path = deliver_dir / f"{job_label}_summary.txt"
+    deliver_aaf_path = deliver_dir / f"{job_label}_rebuilt.aaf"
 
     if not vo_path.exists():
         raise FileNotFoundError(f"Missing VO file: {vo_path}")
@@ -165,6 +223,7 @@ def main():
 
     out_dir.mkdir(exist_ok=True)
     check_dir.mkdir(exist_ok=True)
+    rebuilt_clips_dir.mkdir(exist_ok=True)
     deliver_dir.mkdir(exist_ok=True)
 
     vo, vo_sr = librosa.load(str(vo_path), sr=SR)
@@ -178,6 +237,7 @@ def main():
     output = np.zeros(max_end, dtype=np.float32)
 
     report = []
+    manifest = []
     failed = False
 
     for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
@@ -203,6 +263,9 @@ def main():
         preview_path = check_dir / f"match_{sanitise_name(clip_name)}.wav"
         sf.write(str(preview_path), vo_clip[:target_len], SR)
 
+        rebuilt_clip_path = rebuilt_clips_dir / f"{sanitise_name(clip_name)}_rebuilt.wav"
+        sf.write(str(rebuilt_clip_path), vo_clip[:target_len], SR)
+
         if confidence >= REVIEW_THRESHOLD:
             status = "ok"
             output[out_start:out_end] = vo_clip[:target_len]
@@ -225,8 +288,36 @@ def main():
             "confidence": round(confidence, 6),
             "status": status,
             "output_preview": str(preview_path.relative_to(base)),
+            "rebuilt_file": str(rebuilt_clip_path.relative_to(base)),
         }
         report.append(item)
+
+        manifest.append(
+            {
+                "index": i,
+                "clip_name": clip_name,
+                "timeline": {
+                    "start_tc": start_tc,
+                    "end_tc": end_tc,
+                    "start_sec": round(out_start / SR, 6),
+                    "end_sec": round(out_end / SR, 6),
+                    "duration_sec": round(target_len / SR, 6),
+                    "start_samples": int(out_start),
+                    "end_samples": int(out_end),
+                    "duration_samples": int(target_len),
+                },
+                "source": {
+                    "file": vo_path.name,
+                    "match_sec": round(match_start / SR, 6),
+                    "match_samples": int(match_start),
+                    "duration_sec": round(target_len / SR, 6),
+                    "duration_samples": int(target_len),
+                },
+                "rebuilt_file": str(rebuilt_clip_path),
+                "confidence": round(confidence, 6),
+                "status": status,
+            }
+        )
 
         print(
             f"{clip_name} -> {ref_path.name} -> "
@@ -236,28 +327,36 @@ def main():
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
     if not failed:
         sf.write(str(final_path), output, SR)
+        write_embedded_aaf(manifest, aaf_path)
 
-    write_summary(summary_path, report, final_path, failed)
+    write_summary(summary_path, report, final_path, aaf_path, failed)
 
     if failed:
         print("STOPPED: one or more clips failed validation")
         print(report_path)
         print(summary_path)
+        print(manifest_path)
         return
 
     shutil.copy2(final_path, deliver_final_path)
     shutil.copy2(summary_path, deliver_summary_path)
+    shutil.copy2(aaf_path, deliver_aaf_path)
 
     print("DONE")
     print(final_path)
     print(report_path)
     print(summary_path)
+    print(manifest_path)
+    print(aaf_path)
     print(deliver_final_path)
     print(deliver_summary_path)
+    print(deliver_aaf_path)
 
 
 if __name__ == "__main__":
     main()
-    

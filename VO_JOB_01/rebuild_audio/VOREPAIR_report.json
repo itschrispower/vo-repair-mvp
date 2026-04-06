@@ -10,7 +10,8 @@
     "source_match_sec": 1.804521,
     "confidence": 0.927884,
     "status": "ok",
-    "output_preview": "match_check/match_1.wav"
+    "output_preview": "match_check/match_1.wav",
+    "rebuilt_file": "rebuild_audio/rebuilt_clips/1_rebuilt.wav"
   },
   {
     "index": 2,
@@ -23,7 +24,8 @@
     "source_match_sec": 7.444521,
     "confidence": 0.871871,
     "status": "review",
-    "output_preview": "match_check/match_2.wav"
+    "output_preview": "match_check/match_2.wav",
+    "rebuilt_file": "rebuild_audio/rebuilt_clips/2_rebuilt.wav"
   },
   {
     "index": 3,
@@ -36,6 +38,7 @@
     "source_match_sec": 13.084521,
     "confidence": 0.91767,
     "status": "ok",
-    "output_preview": "match_check/match_3.wav"
+    "output_preview": "match_check/match_3.wav",
+    "rebuilt_file": "rebuild_audio/rebuilt_clips/3_rebuilt.wav"
   }
 ]
