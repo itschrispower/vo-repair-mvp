@@ -1,0 +1,47 @@
+[
+  {
+    "index": 1,
+    "clip_name": "1",
+    "timeline": {
+      "start_tc": "05.26162",
+      "end_tc": "08.41353",
+      "start_sec": 5.545042,
+      "end_sec": 8.861521,
+      "duration_sec": 3.316479
+    },
+    "aaf": {
+      "component_type": "OperationGroup",
+      "length_units": 159191
+    }
+  },
+  {
+    "index": 2,
+    "clip_name": "2",
+    "timeline": {
+      "start_tc": "11.8956",
+      "end_tc": "15.19946",
+      "start_sec": 11.186583,
+      "end_sec": 15.415542,
+      "duration_sec": 4.228958
+    },
+    "aaf": {
+      "component_type": "OperationGroup",
+      "length_units": 202990
+    }
+  },
+  {
+    "index": 3,
+    "clip_name": "3",
+    "timeline": {
+      "start_tc": "16.38908",
+      "end_tc": "21.29694",
+      "start_sec": 16.810583,
+      "end_sec": 21.618625,
+      "duration_sec": 4.808042
+    },
+    "aaf": {
+      "component_type": "OperationGroup",
+      "length_units": 230786
+    }
+  }
+]
