@@ -4,8 +4,6 @@ from pathlib import Path
 
 import run_job
 
-BASE = Path(__file__).resolve().parent.parent
-
 
 def pick_folder():
     result = subprocess.run(
