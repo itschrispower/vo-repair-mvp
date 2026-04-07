@@ -37,7 +37,7 @@ class FilePicker(tk.Frame):
                  bg=PANEL, fg=FG, anchor="w", width=38,
                  relief="flat").pack(side="left")
 
-        tk.Button(self, text="Choose…", font=FONT_SM, bg="#333", fg=FG,
+        tk.Button(self, text="Choose…", font=FONT_SM, bg="#555", fg="white",
                   relief="flat", padx=10, cursor="hand2",
                   command=self._pick).pack(side="right", padx=12, pady=6)
 
