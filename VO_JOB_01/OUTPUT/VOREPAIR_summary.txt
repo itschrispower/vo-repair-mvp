@@ -24,5 +24,5 @@ Matched in VOBU at: 13.084521s
 Confidence: 0.9177
 Rebuilt clip: rebuild_audio/rebuilt_clips/3_rebuilt.wav
 
-Final output written: /workspaces/vo-repair-mvp/VO_JOB_01/rebuild_audio/VOREPAIR_final.wav
-AAF output written: /workspaces/vo-repair-mvp/VO_JOB_01/rebuild_audio/VOREPAIR_rebuilt.aaf
+Final output written: /Users/chris/Desktop/vo-repair-mvp/VO_JOB_01/rebuild_audio/VOREPAIR_final.wav
+AAF output written: /Users/chris/Desktop/vo-repair-mvp/VO_JOB_01/rebuild_audio/VOREPAIR_rebuilt.aaf
