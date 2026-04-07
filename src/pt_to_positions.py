@@ -4,19 +4,9 @@ import math
 
 import aaf2
 
-AAF_FPS = 25.0
+from utils import FPS, find_single_aaf
 
-
-def find_single_aaf(job: Path) -> Path:
-    aafs = sorted(job.glob("*.aaf"))
-    if not aafs:
-        raise FileNotFoundError(f"No AAF found in {job}")
-    if len(aafs) > 1:
-        raise ValueError(
-            "Expected exactly one AAF in job folder, found: "
-            + ", ".join(p.name for p in aafs)
-        )
-    return aafs[0]
+AAF_FPS = FPS
 
 
 def units_to_seconds(units: int, edit_rate: float) -> float:

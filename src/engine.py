@@ -10,8 +10,7 @@ import librosa
 import numpy as np
 import soundfile as sf
 
-SR = 48000
-FPS = 25.0
+from utils import FPS, SR
 FAIL_THRESHOLD = 0.75
 REVIEW_THRESHOLD = 0.90
 

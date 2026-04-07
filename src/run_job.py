@@ -6,8 +6,7 @@ import librosa
 
 from pt_to_positions import main as pt_to_positions_main
 from engine import main as engine_main
-
-SR = 48000
+from utils import SR, find_single_aaf as _find_single_aaf
 DEBUG = False  # False = clean product mode
 
 
@@ -45,15 +44,7 @@ def check_wav_48k(path: Path, label: str):
 
 
 def find_single_aaf(input_dir: Path) -> Path:
-    aafs = sorted(input_dir.glob("*.aaf"))
-    if not aafs:
-        raise FileNotFoundError(f"No AAF found in {input_dir}")
-    if len(aafs) > 1:
-        raise ValueError(
-            "Expected exactly one AAF in INPUT, found: "
-            + ", ".join(p.name for p in aafs)
-        )
-    return aafs[0]
+    return _find_single_aaf(input_dir)
 
 
 def copy_if_needed(src: Path, dst: Path):

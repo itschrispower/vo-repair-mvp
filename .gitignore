@@ -4,5 +4,15 @@ dist/
 __pycache__/
 *.pyc
 .DS_Store
-VO_JOB_01/OUTPUT/
-VO_JOB_01/error.txt
+
+# Job outputs and temp files
+VO_JOB_*/OUTPUT/
+VO_JOB_*/error.txt
+VO_JOB_*/rebuild_audio/
+VO_JOB_*/deliverables/
+VO_JOB_*/auto_refs/
+VO_JOB_*/match_check/
+VO_JOB_*/positions.txt
+
+# Audio files — keep test fixtures out of git
+VO_JOB_*/INPUT/audio/*.wav

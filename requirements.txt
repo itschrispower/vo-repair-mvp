@@ -1,5 +1,4 @@
-streamlit
 numpy
 pyaaf2
-aaf2
 librosa
+soundfile
