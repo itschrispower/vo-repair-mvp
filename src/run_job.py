@@ -1,5 +1,6 @@
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import librosa
@@ -97,6 +98,11 @@ def copy_outputs_to_user_output(job_path: Path):
     shutil.copy2(wav_files[0], output_dir / wav_files[0].name)
     shutil.copy2(summary_files[0], output_dir / summary_files[0].name)
 
+    # Also copy the JSON report so the GUI can display colour-coded results
+    rebuild_dir = job_path / "rebuild_audio"
+    for report in sorted(rebuild_dir.glob("*_report.json")):
+        shutil.copy2(report, output_dir / report.name)
+
     return output_dir
 
 
@@ -175,6 +181,66 @@ def main():
     except Exception as e:
         print(f"FAILED: {e}")
         raise
+
+
+def process_files(aaf_path: Path, ref_wav_path: Path,
+                  vobu_wav_path: Path, output_dir: Path) -> Path:
+    """
+    Process explicitly provided files — no fixed folder structure required.
+    Creates a temporary working directory, runs the pipeline, then copies
+    results to output_dir.
+    """
+    aaf_path     = Path(aaf_path).resolve()
+    ref_wav_path = Path(ref_wav_path).resolve()
+    vobu_wav_path = Path(vobu_wav_path).resolve()
+    output_dir   = Path(output_dir).resolve()
+
+    # Validate inputs
+    for p, label in [
+        (aaf_path,      "AAF file"),
+        (ref_wav_path,  "Reference WAV"),
+        (vobu_wav_path, "VO Backup WAV"),
+    ]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing {label}: {p}")
+
+    check_wav_48k(ref_wav_path,  "Reference WAV")
+    check_wav_48k(vobu_wav_path, "VO Backup WAV")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        audio_dir = tmp / "audio"
+        audio_dir.mkdir()
+
+        # Copy files into expected structure with expected names
+        shutil.copy2(aaf_path,      tmp / aaf_path.name)
+        shutil.copy2(ref_wav_path,  audio_dir / "aaf_reference.wav")
+        shutil.copy2(vobu_wav_path, audio_dir / "VOBU_48k.wav")
+
+        # Run pipeline
+        run_step("pt_to_positions", pt_to_positions_main,
+                 ["pt_to_positions.py", str(tmp)])
+        run_step("engine", engine_main,
+                 ["engine.py", str(tmp)])
+
+        # Copy deliverables to user's output folder
+        deliver_dir = tmp / "deliverables"
+        if not deliver_dir.exists():
+            raise FileNotFoundError("Processing failed — no deliverables produced.")
+
+        for f in sorted(deliver_dir.iterdir()):
+            shutil.copy2(f, output_dir / f.name)
+
+        # Copy JSON report so GUI can show colour-coded results
+        rebuild_dir = tmp / "rebuild_audio"
+        for report in sorted(rebuild_dir.glob("*_report.json")):
+            shutil.copy2(report, output_dir / report.name)
+
+    print("SUCCESS")
+    print(f"Output: {output_dir}")
+    return output_dir
 
 
 if __name__ == "__main__":
