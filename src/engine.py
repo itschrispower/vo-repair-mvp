@@ -11,9 +11,23 @@ import numpy as np
 import soundfile as sf
 
 from utils import FPS, SR
-FAIL_THRESHOLD = 0.75
-REVIEW_THRESHOLD = 0.90
+from matcher import (
+    bandpass,
+    downsample,
+    match_clip_robust,
+    rms_db,
+    DriftTracker,
+    COARSE_RATIO,
+    SILENCE_DB,
+    SR_COARSE,
+)
 
+# Legacy thresholds kept for reference — status is now assigned by matcher.py
+FAIL_THRESHOLD = 0.42
+REVIEW_THRESHOLD = 0.75
+
+
+# ── Timecode helpers ──────────────────────────────────────────────────────────
 
 def tc_to_seconds(tc: str) -> float:
     if ":" in tc:
@@ -34,29 +48,13 @@ def seconds_to_tc(seconds: float) -> str:
     return f"{secs:02d}.{frames:02d}"
 
 
-def norm(x: np.ndarray) -> np.ndarray:
-    x = x.astype(np.float32)
-    if x.size == 0:
-        return x
-    x -= np.mean(x)
-    peak = np.max(np.abs(x))
-    if peak > 0:
-        x /= peak
-    return x
+# ── Audio helpers ─────────────────────────────────────────────────────────────
 
-
-def match_clip(full: np.ndarray, clip: np.ndarray) -> tuple[int, float]:
-    full_n = norm(full)
-    clip_n = norm(clip)
-
-    corr = np.correlate(full_n, clip_n, mode="valid")
-    match_start = int(np.argmax(corr))
-
-    matched = full_n[match_start:match_start + len(clip_n)]
-    denom = np.linalg.norm(matched) * np.linalg.norm(clip_n)
-    confidence = 0.0 if denom == 0 else float(corr[match_start] / denom)
-
-    return match_start, confidence
+def _ensure_mono(audio: np.ndarray) -> np.ndarray:
+    """Mix stereo/multichannel down to mono."""
+    if audio.ndim == 1:
+        return audio.astype(np.float32)
+    return audio.mean(axis=1).astype(np.float32)
 
 
 def load_positions(path: Path):
@@ -83,22 +81,26 @@ def detect_job_label(base: Path) -> str:
     aaf_files = sorted(base.glob("*.aaf"))
     if aaf_files:
         return sanitise_name(aaf_files[0].stem)
-
     txt_files = sorted(
         p for p in base.glob("*.txt")
         if p.name.lower() != "positions.txt"
     )
     if txt_files:
         return sanitise_name(txt_files[0].stem)
-
     return sanitise_name(base.name)
 
 
 def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
-    audio, sr = sf.read(str(aaf_reference_path))
+    """
+    Extract each clip segment from aaf_reference.wav, write as mono WAV.
+
+    Always writes mono regardless of the source file channel count.
+    """
+    raw, sr = sf.read(str(aaf_reference_path))
     if sr != SR:
         raise ValueError(f"aaf_reference.wav must be {SR} Hz, got {sr}")
 
+    audio = _ensure_mono(raw)
     auto_ref_dir.mkdir(exist_ok=True)
     refs = {}
 
@@ -108,43 +110,111 @@ def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
 
         if start < 0 or end <= start or end > len(audio):
             raise ValueError(
-                f"Clip {clip_name} falls outside aaf_reference.wav: {start_tc} -> {end_tc}"
+                f"Clip {clip_name} falls outside aaf_reference.wav: "
+                f"{start_tc} → {end_tc} ({start}–{end} samples, "
+                f"file length {len(audio)} samples)"
             )
 
         clip_audio = audio[start:end]
         out_path = auto_ref_dir / f"{sanitise_name(clip_name)}_auto_ref.wav"
-        sf.write(str(out_path), clip_audio, sr)
+        sf.write(str(out_path), clip_audio, SR)
         refs[clip_name] = out_path
 
     return refs
 
 
-def write_summary(path: Path, report: list[dict], final_path: Path, aaf_path: Path, failed: bool):
-    lines = []
-    lines.append("VO REPAIR SUMMARY")
+def prepare_vobu(vo_path: Path):
+    """
+    Load the VOBU WAV and precompute bandpass + coarse-rate variants.
+
+    Returns (vobu, vobu_bp, vobu_coarse) as mono float32 arrays.
+
+    vobu        — full rate (48 kHz), used for output extraction
+    vobu_bp     — bandpass-filtered (speech range), used for fine NCC
+    vobu_coarse — downsampled bandpass at SR_COARSE, used for coarse search
+    """
+    print(f"Loading VOBU: {vo_path.name}")
+    vobu, vo_sr = librosa.load(str(vo_path), sr=SR, mono=True)
+    if vo_sr != SR:
+        raise ValueError(f"VOBU must be {SR} Hz (got {vo_sr})")
+    vobu = vobu.astype(np.float32)
+
+    print("  Computing bandpass filter for matching…")
+    vobu_bp = bandpass(vobu, sr=SR)
+
+    print("  Downsampling for coarse search…")
+    vobu_coarse = downsample(vobu_bp, from_sr=SR, to_sr=SR_COARSE)
+
+    duration_min = len(vobu) / SR / 60.0
+    print(
+        f"  VOBU: {len(vobu):,} samples ({duration_min:.1f} min) | "
+        f"coarse: {len(vobu_coarse):,} samples"
+    )
+    return vobu, vobu_bp, vobu_coarse
+
+
+# ── Output / reporting helpers ─────────────────────────────────────────────────
+
+def write_summary(
+    path: Path,
+    report: list,
+    final_path: Path,
+    aaf_path: Path,
+    failed: bool,
+):
+    lines = ["VO REPAIR SUMMARY", "=" * 52, ""]
+
+    ok_count = sum(1 for r in report if r["status"] == "ok")
+    review_count = sum(1 for r in report if r["status"] == "review")
+    fail_count = sum(1 for r in report if r["status"] == "fail")
+    incons_count = sum(1 for r in report if not r.get("consistency_ok", True))
+
+    lines.append(
+        f"Clips: {len(report)} total | "
+        f"OK={ok_count}  REVIEW={review_count}  FAIL={fail_count}"
+    )
+    if incons_count:
+        lines.append(f"Consistency warnings: {incons_count}")
     lines.append("")
 
     for item in report:
-        lines.append(f"Clip {item['index']} — {item['status'].upper()}")
-        lines.append(f"Name: {item['clip_name']}")
-        lines.append(f"Ref: {item['ref_name']}")
-        lines.append(f"Placed: {item['timeline_start_tc']} to {item['timeline_end_tc']}")
-        lines.append(f"Matched in VOBU at: {item['source_match_sec']:.6f}s")
-        lines.append(f"Confidence: {item['confidence']:.4f}")
-        lines.append(f"Rebuilt clip: {item['rebuilt_file']}")
+        status_sym = {"ok": "✓", "review": "~", "fail": "✗"}.get(item["status"], "?")
+        lines.append(
+            f"Clip {item['index']} — {status_sym} {item['status'].upper()}"
+        )
+        lines.append(f"  Name:    {item['clip_name']}")
+        lines.append(f"  Ref:     {item['ref_name']}")
+        lines.append(
+            f"  Placed:  {item['timeline_start_tc']} → {item['timeline_end_tc']}"
+        )
+        if item["status"] != "fail":
+            lines.append(
+                f"  VOBU at: {item['source_match_sec']:.4f}s "
+                f"(conf={item['confidence']:.4f}, "
+                f"polarity={'inv' if item.get('polarity', 1) == -1 else 'ok'})"
+            )
+        else:
+            lines.append("  VOBU at: — (no valid match)")
+        if not item.get("consistency_ok", True):
+            dev = item.get("consistency_deviation_s", 0.0)
+            lines.append(f"  ⚠ Consistency: {dev:.3f}s deviation from trend")
+        for reason in item.get("reasons", []):
+            lines.append(f"  ⚑ {reason}")
         lines.append("")
 
     if failed:
-        lines.append("Final output was NOT written because one or more clips failed validation.")
-        lines.append("AAF output was NOT written.")
+        lines.append(
+            "Final output NOT written — one or more clips failed validation."
+        )
+        lines.append("AAF output NOT written.")
     else:
-        lines.append(f"Final output written: {final_path}")
-        lines.append(f"AAF output written: {aaf_path}")
+        lines.append(f"Final WAV: {final_path}")
+        lines.append(f"AAF:       {aaf_path}")
 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_embedded_aaf(manifest: list[dict], out_aaf: Path):
+def write_embedded_aaf(manifest: list, out_aaf: Path):
     with aaf2.open(str(out_aaf), "w") as f:
         comp = f.create.CompositionMob("VOREPAIR_REBUILT")
         comp.usage = "Usage_TopLevel"
@@ -186,6 +256,8 @@ def write_embedded_aaf(manifest: list[dict], out_aaf: Path):
         f.save()
 
 
+# ── Main pipeline ─────────────────────────────────────────────────────────────
+
 def main():
     if len(sys.argv) < 2:
         raise SystemExit("Usage: python3 src/engine.py <job_folder>")
@@ -213,21 +285,21 @@ def main():
     deliver_summary_path = deliver_dir / f"{job_label}_summary.txt"
     deliver_aaf_path = deliver_dir / f"{job_label}_rebuilt.aaf"
 
-    if not vo_path.exists():
-        raise FileNotFoundError(f"Missing VO file: {vo_path}")
-    if not aaf_ref_path.exists():
-        raise FileNotFoundError(f"Missing aaf_reference.wav: {aaf_ref_path}")
-    if not positions_path.exists():
-        raise FileNotFoundError(f"Missing positions file: {positions_path}")
+    for p, label in [
+        (vo_path, "VOBU WAV"),
+        (aaf_ref_path, "aaf_reference.wav"),
+        (positions_path, "positions.txt"),
+    ]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing {label}: {p}")
 
     out_dir.mkdir(exist_ok=True)
     check_dir.mkdir(exist_ok=True)
     rebuilt_clips_dir.mkdir(exist_ok=True)
     deliver_dir.mkdir(exist_ok=True)
 
-    vo, vo_sr = librosa.load(str(vo_path), sr=SR)
-    if vo_sr != SR:
-        raise ValueError(f"VO file must be {SR} Hz")
+    # ── Load + precompute VOBU variants ──────────────────────────────────────
+    vobu, vobu_bp, vobu_coarse = prepare_vobu(vo_path)
 
     clips = load_positions(positions_path)
     auto_refs = build_auto_refs(aaf_ref_path, clips, auto_ref_dir)
@@ -235,29 +307,80 @@ def main():
     max_end = max(tc_to_samples(end_tc) for _, _, end_tc in clips)
     output = np.zeros(max_end, dtype=np.float32)
 
-    report = []
-    manifest = []
+    tracker = DriftTracker(vobu_len=len(vobu), sr=SR)
+
+    report: list = []
+    manifest: list = []
     failed = False
+
+    print(f"\nMatching {len(clips)} clips against VOBU…")
 
     for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
         ref_path = auto_refs[clip_name]
 
-        ref_clip, ref_sr = librosa.load(str(ref_path), sr=SR)
+        ref_raw, ref_sr = sf.read(str(ref_path))
         if ref_sr != SR:
             raise ValueError(f"Reference clip must be {SR} Hz: {ref_path.name}")
-
-        match_start, confidence = match_clip(vo, ref_clip)
+        ref_clip = _ensure_mono(ref_raw)
+        ref_clip_bp = bandpass(ref_clip, sr=SR)
 
         out_start = tc_to_samples(start_tc)
         out_end = tc_to_samples(end_tc)
         target_len = out_end - out_start
 
-        vo_clip = vo[match_start:match_start + target_len]
+        # ── Bounded search window from DriftTracker ───────────────────────
+        search_lo, search_hi = tracker.get_search_window(out_start, target_len)
 
-        if len(vo_clip) < target_len:
-            padded = np.zeros(target_len, dtype=np.float32)
-            padded[:len(vo_clip)] = vo_clip
-            vo_clip = padded
+        # Coarse index bounds (ceiling division for hi)
+        lo_c = search_lo // COARSE_RATIO
+        hi_c = min(len(vobu_coarse), (search_hi + COARSE_RATIO - 1) // COARSE_RATIO)
+
+        # ── Match ─────────────────────────────────────────────────────────
+        result = match_clip_robust(
+            region=vobu[search_lo:search_hi],
+            region_bp=vobu_bp[search_lo:search_hi],
+            region_coarse=vobu_coarse[lo_c:hi_c],
+            clip=ref_clip,
+            clip_bp=ref_clip_bp,
+        )
+
+        # Absolute VOBU offset
+        vobu_match = search_lo + result.offset
+
+        # ── Silence / low-energy override ─────────────────────────────────
+        # Silence clips typically fail matching (NCC=0 → conf=0). Rather than
+        # aborting the pipeline we write zeros at that position and mark REVIEW.
+        # They must NOT be used as drift anchors (their vobu_match is meaningless).
+        clip_db = rms_db(ref_clip)
+        is_silent_clip = clip_db < SILENCE_DB
+        is_original_fail = (result.status == "fail")
+        effective_status = result.status
+        effective_reasons = list(result.reasons)
+
+        if is_original_fail and is_silent_clip:
+            effective_status = "review"
+            effective_reasons.append(
+                "silence detected — zeros written at this position (review expected)"
+            )
+
+        # Record anchor for drift tracking only when we have a real match
+        # (skip silence overrides — their offset is the fallback default, not a real position)
+        if not (is_original_fail and is_silent_clip):
+            tracker.record(out_start, vobu_match, effective_status)
+
+        # ── Extract VOBU segment and write clips ──────────────────────────
+        if is_original_fail and is_silent_clip:
+            # Silence: write zeros — don't extract random VOBU audio
+            vo_clip = np.zeros(target_len, dtype=np.float32)
+        else:
+            vo_clip = vobu[vobu_match: vobu_match + target_len]
+            if len(vo_clip) < target_len:
+                padded = np.zeros(target_len, dtype=np.float32)
+                padded[: len(vo_clip)] = vo_clip
+                vo_clip = padded
+            # Apply polarity correction
+            if result.polarity == -1:
+                vo_clip = -vo_clip
 
         preview_path = check_dir / f"match_{sanitise_name(clip_name)}.wav"
         sf.write(str(preview_path), vo_clip[:target_len], SR)
@@ -265,16 +388,13 @@ def main():
         rebuilt_clip_path = rebuilt_clips_dir / f"{sanitise_name(clip_name)}_rebuilt.wav"
         sf.write(str(rebuilt_clip_path), vo_clip[:target_len], SR)
 
-        if confidence >= REVIEW_THRESHOLD:
-            status = "ok"
-            output[out_start:out_end] = vo_clip[:target_len]
-        elif confidence >= FAIL_THRESHOLD:
-            status = "review"
+        # ── Place clip into output array ──────────────────────────────────
+        if effective_status in ("ok", "review"):
             output[out_start:out_end] = vo_clip[:target_len]
         else:
-            status = "fail"
             failed = True
 
+        # ── Build report item ─────────────────────────────────────────────
         item = {
             "index": i,
             "clip_name": clip_name,
@@ -283,9 +403,27 @@ def main():
             "timeline_end_tc": end_tc,
             "timeline_start_sec": round(out_start / SR, 6),
             "timeline_end_sec": round(out_end / SR, 6),
-            "source_match_sec": round(match_start / SR, 6),
-            "confidence": round(confidence, 6),
-            "status": status,
+            "timeline_start_samples": int(out_start),
+            "timeline_end_samples": int(out_end),
+            "source_match_sec": round(vobu_match / SR, 6),
+            "vobu_match_samples": int(vobu_match),
+            "search_lo_sec": round(search_lo / SR, 4),
+            "search_hi_sec": round(search_hi / SR, 4),
+            "confidence": round(result.confidence, 6),
+            "status": effective_status,
+            "polarity": result.polarity,
+            "reasons": effective_reasons,
+            "candidates_count": len(result.candidates),
+            "candidates_top": [
+                {
+                    "offset_sec": round((search_lo + c.offset) / SR, 4),
+                    "ncc": round(c.ncc, 4),
+                    "polarity": c.polarity,
+                }
+                for c in result.candidates
+            ],
+            "consistency_ok": True,
+            "consistency_deviation_s": 0.0,
             "output_preview": str(preview_path.relative_to(base)),
             "rebuilt_file": str(rebuilt_clip_path.relative_to(base)),
         }
@@ -307,22 +445,49 @@ def main():
                 },
                 "source": {
                     "file": vo_path.name,
-                    "match_sec": round(match_start / SR, 6),
-                    "match_samples": int(match_start),
+                    "match_sec": round(vobu_match / SR, 6),
+                    "match_samples": int(vobu_match),
                     "duration_sec": round(target_len / SR, 6),
                     "duration_samples": int(target_len),
                 },
                 "rebuilt_file": str(rebuilt_clip_path),
-                "confidence": round(confidence, 6),
-                "status": status,
+                "confidence": round(result.confidence, 6),
+                "status": effective_status,
+                "polarity": result.polarity,
             }
         )
 
+        extras = []
+        if result.polarity == -1:
+            extras.append("INV")
+        if effective_reasons:
+            extras.append(effective_reasons[0])
+        extra_str = " | " + " | ".join(extras) if extras else ""
         print(
-            f"{clip_name} -> {ref_path.name} -> "
-            f"{match_start / SR:.6f}s | conf={confidence:.4f} | {status.upper()}"
+            f"  [{i:3d}/{len(clips)}] {clip_name:30s} | "
+            f"VOBU={vobu_match / SR:.3f}s | "
+            f"conf={result.confidence:.3f} | "
+            f"{effective_status.upper()}{extra_str}"
         )
 
+    # ── Consistency post-pass ─────────────────────────────────────────────────
+    DriftTracker.check_consistency(report, sr=SR)
+
+    # Demote ok→review for clips that are inconsistent with the drift trend
+    for item in report:
+        if not item.get("consistency_ok", True) and item["status"] == "ok":
+            item["status"] = "review"
+            dev = item.get("consistency_deviation_s", 0.0)
+            item["reasons"].append(
+                f"demoted ok→review: position {dev:.3f}s from trend "
+                f"(possible wrong candidate)"
+            )
+            print(
+                f"  ⚠ Clip {item['index']} ({item['clip_name']}): "
+                f"consistency deviation {dev:.3f}s → demoted to REVIEW"
+            )
+
+    # ── Write outputs ─────────────────────────────────────────────────────────
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
@@ -334,6 +499,16 @@ def main():
         write_embedded_aaf(manifest, aaf_path)
 
     write_summary(summary_path, report, final_path, aaf_path, failed)
+
+    ok_n = sum(1 for r in report if r["status"] == "ok")
+    rev_n = sum(1 for r in report if r["status"] == "review")
+    fail_n = sum(1 for r in report if r["status"] == "fail")
+    incons_n = sum(1 for r in report if not r.get("consistency_ok", True))
+
+    print(
+        f"\nResult: {ok_n} OK | {rev_n} REVIEW | {fail_n} FAIL"
+        + (f" | {incons_n} consistency warnings" if incons_n else "")
+    )
 
     if failed:
         print("STOPPED: one or more clips failed validation")
