@@ -227,6 +227,14 @@ def main():
             if not p.exists():
                 raise FileNotFoundError(f"Missing {label}: {p}")
 
+        # ── Derive output prefix from AAF filename ────────────────────────────
+
+        aaf_file = next(base.glob("*.aaf"), None)
+        if aaf_file:
+            prefix = aaf_file.stem
+        else:
+            prefix = "output"
+
         # ── Output directories ───────────────────────────────────────────────
 
         out_dir = base / "rebuild_audio"
@@ -538,17 +546,38 @@ def main():
         # ── Copy to deliverables ─────────────────────────────────────────────
 
         try:
-            deliver_final = deliver_dir / "final.wav"
+            deliver_final = deliver_dir / f"{prefix}_final.wav"
             shutil.copy2(final_path, deliver_final)
             log.info(f"Deliverable: {deliver_final}")
         except Exception as e:
             log.error(f"Failed to copy final.wav to deliverables: {e}")
             raise
 
+        # ── Write summary ────────────────────────────────────────────────────
+
+        try:
+            summary_path = deliver_dir / f"{prefix}_summary.txt"
+            ok_count = len([r for r in report if r.get("status") == "ok"])
+            review_count = len([r for r in report if r.get("status") == "review"])
+            forced_count = len([r for r in report if r.get("status") == "forced"])
+            fail_count = len([r for r in report if r.get("status") == "fail"])
+
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(f"VO Repair Summary\n")
+                f.write(f"=================\n\n")
+                f.write(f"Clips processed: {len(report)}\n")
+                f.write(f"  OK:      {ok_count}\n")
+                f.write(f"  REVIEW:  {review_count}\n")
+                f.write(f"  FORCED:  {forced_count}\n")
+                f.write(f"  FAILED:  {fail_count}\n")
+            log.info(f"Summary: {summary_path}")
+        except Exception as e:
+            log.warning(f"Failed to write summary: {e}")
+
         # ── Write report ─────────────────────────────────────────────────────
 
         try:
-            report_path = out_dir / "report.json"
+            report_path = out_dir / f"{prefix}_report.json"
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2)
             log.info(f"Report: {report_path}")
@@ -569,7 +598,7 @@ def main():
 
         try:
             if report:
-                aaf_out_path = out_dir / "rebuilt.aaf"
+                aaf_out_path = out_dir / f"{prefix}_rebuilt.aaf"
                 with aaf2.open(str(aaf_out_path), "w") as f:
                     comp = f.create.CompositionMob("VO_REPAIR_OUTPUT")
                     comp.usage = "Usage_TopLevel"

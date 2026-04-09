@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/sessions/sleepy-peaceful-knuth/mnt/vo-repair-mvp/src/run_job.py", line 15, in <module>
+    from pt_to_positions import main as pt_to_positions_main
+  File "/sessions/sleepy-peaceful-knuth/mnt/vo-repair-mvp/src/pt_to_positions.py", line 44, in <module>
+    import aaf2
+ModuleNotFoundError: No module named 'aaf2'

@@ -1,0 +1,42 @@
+VO REPAIR LAUNCH FIX — macOS Tkinter Crash Resolution
+======================================================
+
+PROBLEM:
+  Tkinter crashes on macOS when launching via double-click of local_run.command
+  Root cause: Apple CommandLineTools Python 3.9.6 has broken Tcl/Tk runtime
+  Symptom: Tcl_Panic → TkpInit crash in /usr/bin/python3
+
+SOLUTION:
+  local_run.command now explicitly detects and uses:
+  1. /opt/homebrew/bin/python3 (Homebrew on Apple Silicon) — PREFERRED
+  2. /usr/local/bin/python3 (Homebrew on Intel Mac) — FALLBACK
+  3. /usr/bin/python3 (System Python) — LAST RESORT
+
+FILES CHANGED:
+  • local_run.command — Complete rewrite with Python detection & error handling
+
+NO CHANGES REQUIRED TO:
+  • run_app.py — Works as-is
+  • gui_app.py — Works as-is
+  • Any other files
+
+TESTING:
+  1. Double-click local_run.command from Finder
+  2. Terminal opens, shows which Python was detected
+  3. venv is created (first run only)
+  4. Dependencies install
+  5. GUI window opens
+  6. On error, terminal stays open to show error message
+
+WHAT IT PRINTS:
+  ✓ Using Homebrew Python: /opt/homebrew/bin/python3
+  ==> Creating virtual environment…
+  ==> Checking dependencies…
+  ==> Starting VO Repair…
+
+IMPORTANT:
+  For best results, install Homebrew Python:
+    brew install python3
+
+  If you have neither Homebrew nor working system Python, the script
+  will show a clear error message with installation instructions.
