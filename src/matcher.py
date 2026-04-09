@@ -71,7 +71,7 @@ EDGE_TRIM_MIN_CLIP_MS: float = 120.0  # only trim if clip is longer than this
 
 # ── Stability / peak sharpness ────────────────────────────────────────────────
 STABILITY_DELTA_MS: float = 15.0   # ±ms window around NCC peak for sharpness check
-MIN_NCC_CANDIDATE: float = 0.30    # ignore candidates below this raw NCC
+MIN_NCC_CANDIDATE: float = 0.25    # ignore candidates below this raw NCC
 
 # ── Polarity flip minimum margin ──────────────────────────────────────────────
 POLARITY_FLIP_MIN_DELTA: float = 0.06  # inverted must beat normal by at least this much
@@ -394,8 +394,10 @@ def match_clip_robust(
             )
             coarse_cands.append((idx_c * coarse_ratio, score_c, pol))
     else:
-        # Fallback: single candidate at offset 0 (fine search explores the full region)
-        coarse_cands = [(0, 0.0, 1)]
+        # Fallback: single candidate at region center (better than hardcoded offset 0)
+        # Fine search will explore ±0.5s around this center point
+        fallback_offset = len(region) // 2 if len(region) > M else 0
+        coarse_cands = [(fallback_offset, 0.0, 1)]
         if is_silent:
             reasons.append("coarse search skipped: silence")
         elif M_c < 2:
@@ -623,10 +625,13 @@ def match_clip_robust(
     conf = float(np.clip(conf, 0.0, 1.0))
 
     # ── 10. Minimum confidence floor ──────────────────────────────────────────
-    # If raw NCC is very low, force fail regardless of other penalties
+    # If raw NCC is very low, force fail UNLESS peak is sharp and methods agree
     if raw_ncc < 0.35 and conf < 0.50:
-        conf = 0.0
-        reasons.append("minimum confidence floor: raw NCC too low")
+        if stability < 0.60 or method_agreement < 0.85:
+            conf = 0.0
+            reasons.append("minimum confidence floor: raw NCC too low")
+        else:
+            reasons.append("minimum floor relaxed: sharp peak + strong method agreement")
 
     # ── 11. Status assignment ─────────────────────────────────────────────────
     if conf >= CONF_OK:
