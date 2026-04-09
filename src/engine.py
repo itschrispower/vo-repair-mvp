@@ -1,9 +1,9 @@
 import json
-import math
-import re
+import logging
 import shutil
 import sys
 from pathlib import Path
+from typing import List, Tuple, Optional
 
 import aaf2
 import librosa
@@ -15,593 +15,612 @@ from matcher import (
     bandpass,
     downsample,
     match_clip_robust,
-    rms_db,
     DriftTracker,
     COARSE_RATIO,
-    SILENCE_DB,
     SR_COARSE,
-    DRIFT_JUMP_S,
+    SILENCE_DB,
+    rms_db,
 )
 
-# Legacy thresholds kept for reference — status is now assigned by matcher.py
-FAIL_THRESHOLD = 0.42
-REVIEW_THRESHOLD = 0.75
+# ── Logging setup ────────────────────────────────────────────────────────────
 
-# Per-window bandpass margin to avoid filter-transient contamination at window edges
-BP_MARGIN: int = int(0.10 * SR)   # 100 ms
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+log = logging.getLogger(__name__)
+
+BP_MARGIN = int(0.10 * SR)  # 100 ms margin for bandpass filtering
 
 
-# ── Timecode helpers ──────────────────────────────────────────────────────────
+# ── Timecode utilities ───────────────────────────────────────────────────────
 
 def tc_to_seconds(tc: str) -> float:
-    if ":" in tc:
-        hh, mm, ss, ff = tc.split(":")
-        return int(ss) + (int(ff) / FPS)
-    secs, frames = tc.split(".")
-    return int(secs) + (int(frames) / FPS)
+    """
+    Parse timecode to seconds.
+
+    Supports:
+      - HH:MM:SS:FF (SMPTE timecode)
+      - SS.FF (simple frame offset)
+
+    Raises ValueError on invalid format.
+    """
+    tc = str(tc).strip()
+
+    try:
+        if ":" in tc:
+            parts = tc.split(":")
+            if len(parts) == 4:
+                hh, mm, ss, ff = parts
+                hours = int(hh)
+                minutes = int(mm)
+                seconds = int(ss)
+                frames = int(ff)
+
+                if not (0 <= hours < 100 and 0 <= minutes < 60 and
+                        0 <= seconds < 60 and 0 <= frames < int(FPS) + 1):
+                    raise ValueError(f"Timecode out of range: {tc}")
+
+                return hours * 3600 + minutes * 60 + seconds + (frames / FPS)
+            else:
+                raise ValueError(f"Invalid SMPTE format (expected HH:MM:SS:FF): {tc}")
+        else:
+            parts = tc.split(".")
+            if len(parts) == 2:
+                secs = int(parts[0])
+                frames = int(parts[1])
+
+                if secs < 0 or frames < 0 or frames >= int(FPS) + 1:
+                    raise ValueError(f"Invalid frame offset: {tc}")
+
+                return secs + (frames / FPS)
+            else:
+                raise ValueError(f"Invalid timecode format: {tc}")
+    except (ValueError, IndexError) as e:
+        raise ValueError(f"Failed to parse timecode '{tc}': {e}")
 
 
 def tc_to_samples(tc: str) -> int:
-    return int(round(tc_to_seconds(tc) * SR))
+    """Convert timecode to sample index at SR."""
+    try:
+        seconds = tc_to_seconds(tc)
+        samples = int(round(seconds * SR))
+        if samples < 0:
+            raise ValueError(f"Negative sample index from {tc}")
+        return samples
+    except Exception as e:
+        raise ValueError(f"Failed to convert timecode to samples '{tc}': {e}")
 
 
-def seconds_to_tc(seconds: float) -> str:
-    total_frames = int(math.floor(seconds * FPS + 1e-9))
-    secs = total_frames // int(FPS)
-    frames = total_frames % int(FPS)
-    return f"{secs:02d}.{frames:02d}"
+# ── Audio utilities ──────────────────────────────────────────────────────────
 
-
-# ── Audio helpers ─────────────────────────────────────────────────────────────
-
-def _ensure_mono(audio: np.ndarray) -> np.ndarray:
-    """Mix stereo/multichannel down to mono."""
+def ensure_mono(audio: np.ndarray) -> np.ndarray:
+    """Convert to mono float32."""
     if audio.ndim == 1:
         return audio.astype(np.float32)
     return audio.mean(axis=1).astype(np.float32)
 
 
-def load_positions(path: Path):
+def load_positions(path: Path) -> List[Tuple[str, str, str]]:
+    """
+    Load clip positions from positions.txt.
+
+    Format:
+      # metadata line (skipped)
+      clip_name start_tc end_tc
+
+    Returns list of (name, start_tc, end_tc) tuples.
+    Raises ValueError if file is missing or malformed.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"positions.txt not found: {path}")
+
     clips = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split()
-            if len(parts) != 3:
-                raise ValueError(f"Bad line in positions.txt: {line}")
-            name, start, end = parts
-            clips.append((name, start, end))
+    lines = path.read_text(encoding="utf-8").splitlines()
+
+    for line_num, line in enumerate(lines, 1):
+        line = line.strip()
+
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.split()
+        if len(parts) < 3:
+            raise ValueError(
+                f"positions.txt:{line_num}: expected 3+ parts (name start end), "
+                f"got {len(parts)}: {line}"
+            )
+
+        name, start_tc, end_tc = parts[0], parts[1], parts[2]
+
+        # Validate timecodes early
+        try:
+            tc_to_samples(start_tc)
+            tc_to_samples(end_tc)
+        except ValueError as e:
+            raise ValueError(f"positions.txt:{line_num}: {e}")
+
+        clips.append((name, start_tc, end_tc))
+
+    if not clips:
+        raise ValueError("positions.txt contains no valid clip lines")
+
     return clips
 
 
-def sanitise_name(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._-")
-    return cleaned or "job"
-
-
-def detect_job_label(base: Path) -> str:
-    aaf_files = sorted(base.glob("*.aaf"))
-    if aaf_files:
-        return sanitise_name(aaf_files[0].stem)
-    txt_files = sorted(
-        p for p in base.glob("*.txt")
-        if p.name.lower() != "positions.txt"
-    )
-    if txt_files:
-        return sanitise_name(txt_files[0].stem)
-    return sanitise_name(base.name)
-
-
-def build_auto_refs(aaf_reference_path: Path, clips, auto_ref_dir: Path):
+def prepare_vobu(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Extract each clip segment from aaf_reference.wav, write as mono WAV.
-    Always writes mono regardless of the source file channel count.
+    Load VOBU WAV and precompute coarse-rate bandpass for search.
+
+    Returns (vobu, vobu_coarse) as mono float32.
     """
-    raw, sr = sf.read(str(aaf_reference_path))
+    if not path.exists():
+        raise FileNotFoundError(f"VOBU WAV not found: {path}")
+
+    try:
+        vobu, sr = librosa.load(str(path), sr=SR, mono=True)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load VOBU: {e}")
+
     if sr != SR:
-        raise ValueError(f"aaf_reference.wav must be {SR} Hz, got {sr}")
+        raise ValueError(f"VOBU must be {SR} Hz; got {sr} Hz")
 
-    audio = _ensure_mono(raw)
-    auto_ref_dir.mkdir(exist_ok=True)
-    refs = {}
-
-    for clip_name, start_tc, end_tc in clips:
-        start = tc_to_samples(start_tc)
-        end = tc_to_samples(end_tc)
-
-        if start < 0 or end <= start or end > len(audio):
-            raise ValueError(
-                f"Clip {clip_name} falls outside aaf_reference.wav: "
-                f"{start_tc} → {end_tc} ({start}–{end} samples, "
-                f"file length {len(audio)} samples)"
-            )
-
-        clip_audio = audio[start:end]
-        out_path = auto_ref_dir / f"{sanitise_name(clip_name)}_auto_ref.wav"
-        sf.write(str(out_path), clip_audio, SR)
-        refs[clip_name] = out_path
-
-    return refs
-
-
-def prepare_vobu(vo_path: Path):
-    """
-    Load the VOBU WAV and precompute the coarse-rate variant for fast search.
-
-    Returns (vobu, vobu_coarse) as mono float32 arrays.
-
-    vobu        — full rate (48 kHz), used for output extraction and per-window
-                  bandpass computation during matching
-    vobu_coarse — downsampled bandpass at SR_COARSE, used for coarse search
-
-    Note: a full-rate bandpass copy (vobu_bp) is NOT stored globally — that
-    would use ~700 MB for a 1-hour VOBU. Instead, bandpass is computed on-demand
-    per search window with BP_MARGIN padding to avoid transient artefacts.
-    """
-    print(f"Loading VOBU: {vo_path.name}")
-    vobu, vo_sr = librosa.load(str(vo_path), sr=SR, mono=True)
-    if vo_sr != SR:
-        raise ValueError(f"VOBU must be {SR} Hz (got {vo_sr})")
     vobu = vobu.astype(np.float32)
 
-    print("  Computing coarse-rate bandpass for search…")
-    vobu_bp_tmp = bandpass(vobu, sr=SR)
-    vobu_coarse = downsample(vobu_bp_tmp, from_sr=SR, to_sr=SR_COARSE)
-    del vobu_bp_tmp  # free ~700 MB — bandpass recomputed per window at runtime
+    if len(vobu) == 0:
+        raise ValueError("VOBU is empty")
 
-    duration_min = len(vobu) / SR / 60.0
-    print(
-        f"  VOBU: {len(vobu):,} samples ({duration_min:.1f} min) | "
-        f"coarse: {len(vobu_coarse):,} samples"
-    )
+    try:
+        vobu_bp = bandpass(vobu, sr=SR)
+        vobu_coarse = downsample(vobu_bp, from_sr=SR, to_sr=SR_COARSE)
+    except Exception as e:
+        raise RuntimeError(f"Failed to process VOBU: {e}")
+
+    log.info(f"VOBU loaded: {len(vobu):,} samples ({len(vobu)/SR/60:.1f} min)")
+    log.info(f"Coarse: {len(vobu_coarse):,} samples")
+
     return vobu, vobu_coarse
 
 
-# ── Output / reporting helpers ────────────────────────────────────────────────
+def load_reference(path: Path) -> np.ndarray:
+    """Load aaf_reference.wav as mono float32."""
+    if not path.exists():
+        raise FileNotFoundError(f"aaf_reference.wav not found: {path}")
 
-def write_summary(
-    path: Path,
-    report: list,
-    final_path: Path,
-    aaf_path,           # Path or None
-    has_failures: bool,
-):
-    lines = ["VO REPAIR SUMMARY", "=" * 52, ""]
+    try:
+        raw, sr = sf.read(str(path))
+    except Exception as e:
+        raise RuntimeError(f"Failed to load aaf_reference.wav: {e}")
 
-    ok_count     = sum(1 for r in report if r["status"] == "ok")
-    review_count = sum(1 for r in report if r["status"] == "review")
-    fail_count   = sum(1 for r in report if r["status"] == "fail")
-    forced_count = sum(1 for r in report if r["status"] == "forced")
-    incons_count = sum(1 for r in report if not r.get("consistency_ok", True))
+    if sr != SR:
+        raise ValueError(f"aaf_reference.wav must be {SR} Hz; got {sr} Hz")
 
-    lines.append(
-        f"Clips: {len(report)} total | "
-        f"OK={ok_count}  REVIEW={review_count}  FAIL={fail_count}"
-        + (f"  FORCED={forced_count}" if forced_count else "")
-    )
-    if incons_count:
-        lines.append(f"Consistency warnings: {incons_count}")
-    if has_failures:
-        lines.append(
-            f"⚠ {forced_count} clip(s) had low-confidence matches — "
-            f"best-guess audio included and flagged FORCED."
-        )
-    lines.append("")
+    audio = ensure_mono(raw)
 
-    for item in report:
-        st = item["status"]
-        status_sym = {"ok": "✓", "review": "~", "fail": "✗", "forced": "⚡"}.get(st, "?")
-        lines.append(f"Clip {item['index']} — {status_sym} {st.upper()}")
-        lines.append(f"  Name:    {item['clip_name']}")
-        lines.append(f"  Ref:     {item['ref_name']}")
-        lines.append(
-            f"  Placed:  {item['timeline_start_tc']} → {item['timeline_end_tc']}"
-        )
-        lines.append(
-            f"  VOBU at: {item['source_match_sec']:.4f}s "
-            f"(conf={item['confidence']:.4f}, "
-            f"raw={item.get('raw_ncc', 0):.4f}, "
-            f"stab={item.get('stability', 1.0):.2f}, "
-            f"agree={item.get('method_agreement', 1.0):.2f}, "
-            f"polarity={'inv' if item.get('polarity', 1) == -1 else 'ok'})"
-        )
-        if not item.get("consistency_ok", True):
-            dev = item.get("consistency_deviation_s", 0.0)
-            lines.append(f"  ⚠ Consistency: {dev:.3f}s deviation from trend")
-        if item.get("drift_jump_s", 0.0) > DRIFT_JUMP_S:
-            lines.append(f"  ⚠ Drift jump: {item['drift_jump_s']:.2f}s — check for false positive")
-        for reason in item.get("reasons", []):
-            lines.append(f"  ⚑ {reason}")
-        lines.append("")
+    if len(audio) == 0:
+        raise ValueError("aaf_reference.wav is empty")
 
-    lines.append(f"Final WAV: {final_path}")
-    if aaf_path and Path(aaf_path).exists():
-        lines.append(f"AAF:       {aaf_path}")
-    else:
-        lines.append("AAF:       not generated (see log for details)")
+    log.info(f"Reference loaded: {len(audio):,} samples ({len(audio)/SR:.1f}s)")
 
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return audio
 
 
-def write_embedded_aaf(manifest: list, out_aaf: Path):
-    with aaf2.open(str(out_aaf), "w") as f:
-        comp = f.create.CompositionMob("VOREPAIR_REBUILT")
-        comp.usage = "Usage_TopLevel"
-        f.content.mobs.append(comp)
-
-        slot = comp.create_sound_slot(edit_rate=SR)
-        seq = slot.segment
-
-        current_pos = 0
-
-        for item in manifest:
-            timeline_start = int(item["timeline"]["start_samples"])
-            duration = int(item["timeline"]["duration_samples"])
-            rebuilt_file = Path(item["rebuilt_file"]).resolve()
-
-            if timeline_start > current_pos:
-                filler = f.create.Filler("sound")
-                filler.length = timeline_start - current_pos
-                seq.components.append(filler)
-                current_pos = timeline_start
-
-            mob_name = f"clip_{item['index']}_{item['clip_name']}"
-            master_mob = f.create.MasterMob(mob_name)
-            f.content.mobs.append(master_mob)
-
-            essence_slot = master_mob.import_audio_essence(str(rebuilt_file), SR)
-
-            src_clip = master_mob.create_source_clip(
-                slot_id=essence_slot.slot_id,
-                start=0,
-                length=duration,
-                media_kind="sound",
-            )
-            src_clip.length = duration
-
-            seq.components.append(src_clip)
-            current_pos += duration
-
-        f.save()
-
-
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Main pipeline ────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) < 2:
         raise SystemExit("Usage: python3 src/engine.py <job_folder>")
 
-    base = Path(sys.argv[1]).resolve()
-    job_label = detect_job_label(base)
+    try:
+        base = Path(sys.argv[1]).resolve()
 
-    vo_path       = base / "audio" / "VOBU_48k.wav"
-    aaf_ref_path  = base / "audio" / "aaf_reference.wav"
-    positions_path = base / "positions.txt"
+        # ── Input validation ─────────────────────────────────────────────────
 
-    out_dir          = base / "rebuild_audio"
-    check_dir        = base / "match_check"
-    auto_ref_dir     = base / "auto_refs"
-    rebuilt_clips_dir = out_dir / "rebuilt_clips"
-    deliver_dir      = base / "deliverables"
+        vo_path = base / "audio" / "VOBU_48k.wav"
+        ref_path = base / "audio" / "aaf_reference.wav"
+        pos_path = base / "positions.txt"
 
-    final_path    = out_dir / f"{job_label}_final.wav"
-    report_path   = out_dir / f"{job_label}_report.json"
-    summary_path  = out_dir / f"{job_label}_summary.txt"
-    manifest_path = out_dir / f"{job_label}_manifest.json"
-    aaf_out_path  = out_dir / f"{job_label}_rebuilt.aaf"
+        for p, label in [(vo_path, "VOBU_48k.wav"),
+                         (ref_path, "aaf_reference.wav"),
+                         (pos_path, "positions.txt")]:
+            if not p.exists():
+                raise FileNotFoundError(f"Missing {label}: {p}")
 
-    deliver_final_path   = deliver_dir / f"{job_label}_final.wav"
-    deliver_summary_path = deliver_dir / f"{job_label}_summary.txt"
-    deliver_aaf_path     = deliver_dir / f"{job_label}_rebuilt.aaf"
+        # ── Output directories ───────────────────────────────────────────────
 
-    for p, label in [
-        (vo_path,        "VOBU WAV"),
-        (aaf_ref_path,   "aaf_reference.wav"),
-        (positions_path, "positions.txt"),
-    ]:
-        if not p.exists():
-            raise FileNotFoundError(f"Missing {label}: {p}")
+        out_dir = base / "rebuild_audio"
+        check_dir = base / "match_check"
+        deliver_dir = base / "deliverables"
 
-    out_dir.mkdir(exist_ok=True)
-    check_dir.mkdir(exist_ok=True)
-    rebuilt_clips_dir.mkdir(exist_ok=True)
-    deliver_dir.mkdir(exist_ok=True)
+        out_dir.mkdir(exist_ok=True, parents=True)
+        check_dir.mkdir(exist_ok=True, parents=True)
+        deliver_dir.mkdir(exist_ok=True, parents=True)
 
-    # ── Load + precompute VOBU variants ──────────────────────────────────────
-    vobu, vobu_coarse = prepare_vobu(vo_path)
+        # ── Load audio ───────────────────────────────────────────────────────
 
-    clips     = load_positions(positions_path)
-    auto_refs = build_auto_refs(aaf_ref_path, clips, auto_ref_dir)
+        log.info("Loading audio files…")
+        vobu, vobu_coarse = prepare_vobu(vo_path)
+        ref_audio = load_reference(ref_path)
 
-    max_end = max(tc_to_samples(end_tc) for _, _, end_tc in clips)
-    output  = np.zeros(max_end, dtype=np.float32)
+        # ── Load positions ───────────────────────────────────────────────────
 
-    tracker = DriftTracker(vobu_len=len(vobu), sr=SR)
+        log.info("Loading positions…")
+        clips = load_positions(pos_path)
+        log.info(f"Found {len(clips)} clips to process")
 
-    report: list       = []
-    manifest: list     = []
-    has_failures: bool = False   # True if any clip landed in "forced" status
+        # ── Allocate output buffer ───────────────────────────────────────────
 
-    print(f"\nMatching {len(clips)} clips against VOBU…")
+        # Find max end time to size output buffer
+        max_end_sample = 0
+        for name, start_tc, end_tc in clips:
+            try:
+                end_sample = tc_to_samples(end_tc)
+                max_end_sample = max(max_end_sample, end_sample)
+            except Exception as e:
+                log.warning(f"Skipping clip '{name}' (invalid timecode): {e}")
+                continue
 
-    for i, (clip_name, start_tc, end_tc) in enumerate(clips, start=1):
-        ref_path = auto_refs[clip_name]
+        if max_end_sample <= 0:
+            raise ValueError("No valid clip timecodes found")
 
-        ref_raw, ref_sr = sf.read(str(ref_path))
-        if ref_sr != SR:
-            raise ValueError(f"Reference clip must be {SR} Hz: {ref_path.name}")
-        ref_clip    = _ensure_mono(ref_raw)
-        ref_clip_bp = bandpass(ref_clip, sr=SR)
+        output = np.zeros(max_end_sample, dtype=np.float32)
+        log.info(f"Output buffer: {max_end_sample:,} samples ({max_end_sample/SR:.1f}s)")
 
-        out_start  = tc_to_samples(start_tc)
-        out_end    = tc_to_samples(end_tc)
-        target_len = out_end - out_start
+        # ── Initialize DriftTracker ──────────────────────────────────────────
 
-        # ── Bounded search window from DriftTracker ───────────────────────
-        search_lo, search_hi = tracker.get_search_window(out_start, target_len)
+        tracker = DriftTracker(vobu_len=len(vobu), sr=SR)
 
-        lo_c = search_lo // COARSE_RATIO
-        hi_c = min(len(vobu_coarse), (search_hi + COARSE_RATIO - 1) // COARSE_RATIO)
+        # ── Match clips ──────────────────────────────────────────────────────
 
-        # ── Per-window bandpass (memory-efficient: avoids storing full VOBU BP) ──
-        bp_lo           = max(0, search_lo - BP_MARGIN)
-        bp_hi           = min(len(vobu), search_hi + BP_MARGIN)
-        region_bp_padded = bandpass(vobu[bp_lo:bp_hi], sr=SR)
-        bp_inner         = search_lo - bp_lo
-        region_bp        = region_bp_padded[bp_inner: bp_inner + (search_hi - search_lo)]
-        del region_bp_padded
+        log.info(f"\nMatching {len(clips)} clips…\n")
 
-        # ── Match ─────────────────────────────────────────────────────────
-        result = match_clip_robust(
-            region=vobu[search_lo:search_hi],
-            region_bp=region_bp,
-            region_coarse=vobu_coarse[lo_c:hi_c],
-            clip=ref_clip,
-            clip_bp=ref_clip_bp,
-        )
+        processed = 0
+        skipped = 0
+        report = []
 
-        # ── vobu_match: correct for edge-trim offset ──────────────────────
-        # result.offset = start of the trimmed clip in region.
-        # Subtract trim_samples to get the true start of the original clip.
-        vobu_match = max(0, search_lo + result.offset - result.trim_samples)
+        for clip_idx, (name, start_tc, end_tc) in enumerate(clips, 1):
+            try:
+                # Parse timecodes
+                try:
+                    start_sample = tc_to_samples(start_tc)
+                    end_sample = tc_to_samples(end_tc)
+                except ValueError as e:
+                    log.warning(f"[{clip_idx:3d}] {name} skipped: {e}")
+                    skipped += 1
+                    continue
 
-        # ── Classify and assign effective status ──────────────────────────
-        clip_db         = rms_db(ref_clip)
-        is_silent_clip  = clip_db < SILENCE_DB
-        is_original_fail = (result.status == "fail")
-        effective_status = result.status
-        effective_reasons = list(result.reasons)
-        forced = False
+                target_len = end_sample - start_sample
 
-        if is_original_fail and is_silent_clip:
-            # Silent clip that also failed: write zeros and mark review.
-            # Better to have silence than random VOBU audio at an unknown offset.
-            effective_status = "review"
-            effective_reasons.append(
-                "silence detected — zeros written at this position (review expected)"
-            )
-        elif is_original_fail:
-            # Non-silent clip with a failed match: include best-guess audio
-            # and mark FORCED so the engineer knows to check it.
-            effective_status = "forced"
-            forced = True
-            has_failures = True
-            effective_reasons.append(
-                "FORCED: low-confidence match — best-guess audio written, manual review required"
-            )
+                # Validate clip extent
+                if target_len <= 0:
+                    log.warning(
+                        f"[{clip_idx:3d}] {name} skipped "
+                        f"(invalid range: {start_tc} → {end_tc})"
+                    )
+                    skipped += 1
+                    continue
 
-        # ── Drift jump detection ──────────────────────────────────────────
-        drift_jump_s  = 0.0
-        is_drift_jump = False
-        if not (is_original_fail and is_silent_clip):
-            drift_jump_s  = tracker.check_drift_jump(out_start, vobu_match)
-            is_drift_jump = drift_jump_s > DRIFT_JUMP_S
-            if is_drift_jump:
-                effective_reasons.append(
-                    f"drift jump: {drift_jump_s:.2f}s from predicted position — "
-                    f"possible false positive"
+                if start_sample >= len(output):
+                    log.warning(
+                        f"[{clip_idx:3d}] {name} skipped "
+                        f"(start {start_sample} beyond output buffer)"
+                    )
+                    skipped += 1
+                    continue
+
+                # Extract reference clip
+                if end_sample > len(ref_audio):
+                    log.warning(
+                        f"[{clip_idx:3d}] {name} skipped "
+                        f"(end {end_tc} beyond reference length)"
+                    )
+                    skipped += 1
+                    continue
+
+                ref_clip = ref_audio[start_sample:end_sample].astype(np.float32)
+
+                if len(ref_clip) == 0:
+                    log.warning(f"[{clip_idx:3d}] {name} skipped (empty reference)")
+                    skipped += 1
+                    continue
+
+                ref_bp = bandpass(ref_clip, sr=SR)
+
+                # ── Get search window ────────────────────────────────────────
+
+                search_lo, search_hi = tracker.get_search_window(start_sample, target_len)
+
+                # Validate search window
+                search_lo = max(0, search_lo)
+                search_hi = min(len(vobu), search_hi)
+
+                if search_lo >= search_hi:
+                    log.warning(
+                        f"[{clip_idx:3d}] {name} skipped (invalid search window)"
+                    )
+                    skipped += 1
+                    continue
+
+                if (search_hi - search_lo) < len(ref_clip):
+                    log.warning(
+                        f"[{clip_idx:3d}] {name} skipped "
+                        f"(search window {search_hi-search_lo} < clip len {len(ref_clip)})"
+                    )
+                    skipped += 1
+                    continue
+
+                # ── Compute coarse indices ───────────────────────────────────
+
+                lo_c = search_lo // COARSE_RATIO
+                hi_c = min(len(vobu_coarse), (search_hi + COARSE_RATIO - 1) // COARSE_RATIO)
+
+                if lo_c >= hi_c:
+                    log.warning(f"[{clip_idx:3d}] {name} skipped (invalid coarse window)")
+                    skipped += 1
+                    continue
+
+                # ── Extract and bandpass search region ───────────────────────
+
+                bp_lo = max(0, search_lo - BP_MARGIN)
+                bp_hi = min(len(vobu), search_hi + BP_MARGIN)
+
+                region_bp_raw = bandpass(vobu[bp_lo:bp_hi], sr=SR)
+                bp_start = search_lo - bp_lo
+                bp_end = bp_start + (search_hi - search_lo)
+
+                if bp_end > len(region_bp_raw):
+                    bp_end = len(region_bp_raw)
+
+                region_bp = region_bp_raw[bp_start:bp_end]
+
+                if len(region_bp) != (search_hi - search_lo):
+                    log.warning(f"[{clip_idx:3d}] {name} skipped (bandpass mismatch)")
+                    skipped += 1
+                    continue
+
+                # ── First pass: narrow window match ──────────────────────────
+
+                try:
+                    result = match_clip_robust(
+                        region=vobu[search_lo:search_hi],
+                        region_bp=region_bp,
+                        region_coarse=vobu_coarse[lo_c:hi_c],
+                        clip=ref_clip,
+                        clip_bp=ref_bp,
+                    )
+                except Exception as e:
+                    log.warning(f"[{clip_idx:3d}] {name} skipped (matching failed): {e}")
+                    skipped += 1
+                    continue
+
+                # ── Two-pass retry: expand window for uncertain results ──────
+
+                should_retry = (
+                    result.status == "fail"
+                    or result.confidence < 0.7
+                    or result.status in ("review", "forced")
                 )
 
-        # Record as drift anchor — skip silence overrides and jumps to avoid
-        # poisoning the regression with unreliable positions.
-        if not (is_original_fail and is_silent_clip) and not is_drift_jump:
-            tracker.record(
-                out_start, vobu_match, effective_status,
-                confidence=result.confidence,
-            )
+                if should_retry and (search_lo > 0 or search_hi < len(vobu)):
+                    try:
+                        if len(tracker._anchors) < 2:
+                            expand = int(20.0 * SR)
+                            lo_w = max(0, search_lo - expand)
+                            hi_w = min(len(vobu), search_hi + expand)
+                        else:
+                            expand = (search_hi - search_lo) // 2
+                            lo_w = max(0, search_lo - expand)
+                            hi_w = min(len(vobu), search_hi + expand)
 
-        # ── Extract VOBU segment ──────────────────────────────────────────
-        if is_original_fail and is_silent_clip:
-            vo_clip = np.zeros(target_len, dtype=np.float32)
-        else:
-            vo_clip = vobu[vobu_match: vobu_match + target_len]
-            if len(vo_clip) < target_len:
-                padded = np.zeros(target_len, dtype=np.float32)
-                padded[: len(vo_clip)] = vo_clip
-                vo_clip = padded
-            if result.polarity == -1:
-                vo_clip = -vo_clip
+                        if (hi_w - lo_w) > (search_hi - search_lo) * 1.3:
+                            lo_c_w = lo_w // COARSE_RATIO
+                            hi_c_w = min(len(vobu_coarse), (hi_w + COARSE_RATIO - 1) // COARSE_RATIO)
 
-        preview_path = check_dir / f"match_{sanitise_name(clip_name)}.wav"
-        sf.write(str(preview_path), vo_clip[:target_len], SR)
+                            bp_lo_w = max(0, lo_w - BP_MARGIN)
+                            bp_hi_w = min(len(vobu), hi_w + BP_MARGIN)
 
-        rebuilt_clip_path = rebuilt_clips_dir / f"{sanitise_name(clip_name)}_rebuilt.wav"
-        sf.write(str(rebuilt_clip_path), vo_clip[:target_len], SR)
+                            region_bp_w_raw = bandpass(vobu[bp_lo_w:bp_hi_w], sr=SR)
+                            bp_start_w = lo_w - bp_lo_w
+                            bp_end_w = bp_start_w + (hi_w - lo_w)
 
-        # ── ALWAYS place clip into output array ───────────────────────────
-        # Never abort due to failed/forced clips — always include the best
-        # available audio. Forced clips are flagged in the report and summary.
-        output[out_start:out_end] = vo_clip[:target_len]
+                            if bp_end_w > len(region_bp_w_raw):
+                                bp_end_w = len(region_bp_w_raw)
 
-        # ── Build report item ─────────────────────────────────────────────
-        item = {
-            "index": i,
-            "clip_name": clip_name,
-            "ref_name": ref_path.name,
-            "timeline_start_tc": start_tc,
-            "timeline_end_tc": end_tc,
-            "timeline_start_sec": round(out_start / SR, 6),
-            "timeline_end_sec": round(out_end / SR, 6),
-            "timeline_start_samples": int(out_start),
-            "timeline_end_samples": int(out_end),
-            "source_match_sec": round(vobu_match / SR, 6),
-            "vobu_match_samples": int(vobu_match),
-            "search_lo_sec": round(search_lo / SR, 4),
-            "search_hi_sec": round(search_hi / SR, 4),
-            "confidence": round(result.confidence, 6),
-            "raw_ncc": round(result.raw_ncc, 6),
-            "stability": round(result.stability, 4),
-            "method_agreement": round(result.method_agreement, 4),
-            "trim_samples": result.trim_samples,
-            "near_cands_count": result.near_cands_count,
-            "drift_jump_s": round(drift_jump_s, 4),
-            "status": effective_status,
-            "forced": forced,
-            "polarity": result.polarity,
-            "reasons": effective_reasons,
-            "candidates_count": len(result.candidates),
-            "candidates_top": [
-                {
-                    "offset_sec": round(
-                        (search_lo + c.offset - result.trim_samples) / SR, 4
-                    ),
-                    "ncc": round(c.ncc, 4),
-                    "ncc_wb": round(c.ncc_wb, 4),
-                    "ncc_bp": round(c.ncc_bp, 4),
-                    "stability": round(c.stability, 4),
-                    "polarity": c.polarity,
-                }
-                for c in result.candidates
-            ],
-            "consistency_ok": True,
-            "consistency_deviation_s": 0.0,
-            "output_preview": str(preview_path.relative_to(base)),
-            "rebuilt_file": str(rebuilt_clip_path.relative_to(base)),
-        }
-        report.append(item)
+                            region_bp_w = region_bp_w_raw[bp_start_w:bp_end_w]
 
-        manifest.append(
-            {
-                "index": i,
-                "clip_name": clip_name,
-                "timeline": {
-                    "start_tc": start_tc,
-                    "end_tc": end_tc,
-                    "start_sec": round(out_start / SR, 6),
-                    "end_sec": round(out_end / SR, 6),
-                    "duration_sec": round(target_len / SR, 6),
-                    "start_samples": int(out_start),
-                    "end_samples": int(out_end),
-                    "duration_samples": int(target_len),
-                },
-                "source": {
-                    "file": vo_path.name,
-                    "match_sec": round(vobu_match / SR, 6),
-                    "match_samples": int(vobu_match),
-                    "duration_sec": round(target_len / SR, 6),
-                    "duration_samples": int(target_len),
-                },
-                "rebuilt_file": str(rebuilt_clip_path),
-                "confidence": round(result.confidence, 6),
-                "status": effective_status,
-                "forced": forced,
-                "polarity": result.polarity,
-            }
-        )
+                            if len(region_bp_w) == (hi_w - lo_w):
+                                result_w = match_clip_robust(
+                                    region=vobu[lo_w:hi_w],
+                                    region_bp=region_bp_w,
+                                    region_coarse=vobu_coarse[lo_c_w:hi_c_w],
+                                    clip=ref_clip,
+                                    clip_bp=ref_bp,
+                                )
 
-        extras = []
-        if result.polarity == -1:
-            extras.append("INV")
-        if is_drift_jump:
-            extras.append(f"JUMP={drift_jump_s:.1f}s")
-        if forced:
-            extras.append("FORCED")
-        elif effective_reasons:
-            extras.append(effective_reasons[0][:60])
-        extra_str = " | " + " | ".join(extras) if extras else ""
-        print(
-            f"  [{i:3d}/{len(clips)}] {clip_name:30s} | "
-            f"VOBU={vobu_match / SR:.3f}s | "
-            f"conf={result.confidence:.3f} stab={result.stability:.2f} | "
-            f"{effective_status.upper()}{extra_str}"
-        )
+                                if result_w.confidence > result.confidence:
+                                    result = result_w
+                                    search_lo, search_hi = lo_w, hi_w
+                    except Exception as e:
+                        log.debug(f"[{clip_idx:3d}] {name} retry failed: {e}")
 
-    # ── Consistency post-pass ─────────────────────────────────────────────────
-    DriftTracker.check_consistency(report, sr=SR)
+                # ── Compute VOBU match position ──────────────────────────────
 
-    for item in report:
-        if not item.get("consistency_ok", True) and item["status"] == "ok":
-            item["status"] = "review"
-            dev = item.get("consistency_deviation_s", 0.0)
-            item["reasons"].append(
-                f"demoted ok→review: position {dev:.3f}s from trend "
-                f"(possible wrong candidate)"
-            )
-            print(
-                f"  ⚠ Clip {item['index']} ({item['clip_name']}): "
-                f"consistency deviation {dev:.3f}s → demoted to REVIEW"
-            )
+                vobu_match = max(0, search_lo + result.offset - result.trim_samples)
 
-    # ── Write JSON report and manifest ────────────────────────────────────────
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+                # ── Extract output audio ─────────────────────────────────────
 
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+                if vobu_match + target_len > len(vobu):
+                    available = len(vobu) - vobu_match
+                    vo_clip = vobu[vobu_match:vobu_match + available]
 
-    # ── ALWAYS write final WAV ────────────────────────────────────────────────
-    sf.write(str(final_path), output, SR)
-    print(f"\nFinal WAV: {final_path.name}")
+                    if len(vo_clip) < target_len:
+                        padded = np.zeros(target_len, dtype=np.float32)
+                        padded[:len(vo_clip)] = vo_clip
+                        vo_clip = padded
+                else:
+                    vo_clip = vobu[vobu_match:vobu_match + target_len].astype(np.float32)
 
-    # ── ALWAYS attempt AAF generation ─────────────────────────────────────────
-    aaf_written = False
-    aaf_deliver = None
-    try:
-        write_embedded_aaf(manifest, aaf_out_path)
-        aaf_written = True
-        aaf_deliver = aaf_out_path
-        print(f"AAF:       {aaf_out_path.name}")
-    except Exception as exc:
-        print(f"⚠ AAF generation failed: {exc}")
+                # Ensure exact length
+                if len(vo_clip) > target_len:
+                    vo_clip = vo_clip[:target_len]
+                elif len(vo_clip) < target_len:
+                    padded = np.zeros(target_len, dtype=np.float32)
+                    padded[:len(vo_clip)] = vo_clip
+                    vo_clip = padded
 
-    # ── Write summary ─────────────────────────────────────────────────────────
-    write_summary(summary_path, report, final_path, aaf_deliver, has_failures)
+                # Apply polarity if needed
+                if result.polarity == -1:
+                    vo_clip = -vo_clip
 
-    # ── Copy everything to deliverables (always) ──────────────────────────────
-    deliver_dir.mkdir(exist_ok=True)
-    shutil.copy2(final_path, deliver_final_path)
-    shutil.copy2(summary_path, deliver_summary_path)
-    if aaf_written and aaf_out_path.exists():
-        shutil.copy2(aaf_out_path, deliver_aaf_path)
+                # ── Write to output buffer ───────────────────────────────────
 
-    ok_n     = sum(1 for r in report if r["status"] == "ok")
-    rev_n    = sum(1 for r in report if r["status"] == "review")
-    fail_n   = sum(1 for r in report if r["status"] == "fail")
-    forced_n = sum(1 for r in report if r["status"] == "forced")
-    incons_n = sum(1 for r in report if not r.get("consistency_ok", True))
+                write_end = min(end_sample, len(output))
+                write_len = write_end - start_sample
 
-    print(
-        f"\nResult: {ok_n} OK | {rev_n} REVIEW | {fail_n} FAIL"
-        + (f" | {forced_n} FORCED" if forced_n else "")
-        + (f" | {incons_n} consistency warnings" if incons_n else "")
-    )
-    if has_failures:
-        print(
-            f"⚠ {forced_n} clip(s) low-confidence — "
-            f"best-guess audio written. Review FORCED clips before delivery."
-        )
-    print("DONE")
-    print(final_path)
-    print(report_path)
-    print(summary_path)
-    print(manifest_path)
-    if aaf_written:
-        print(aaf_out_path)
-        print(deliver_aaf_path)
-    print(deliver_final_path)
-    print(deliver_summary_path)
+                if write_len > 0:
+                    output[start_sample:write_end] = vo_clip[:write_len]
+
+                # ── Record anchor for DriftTracker ──────────────────────────
+
+                tracker.record(start_sample, vobu_match, result.status, confidence=result.confidence)
+
+                # ── Write preview file ───────────────────────────────────────
+
+                try:
+                    preview_path = check_dir / f"{clip_idx:03d}_{name}.wav"
+                    sf.write(str(preview_path), vo_clip, SR)
+                except Exception as e:
+                    log.debug(f"[{clip_idx:3d}] {name} preview write failed: {e}")
+
+                # ── Log result ───────────────────────────────────────────────
+
+                status_sym = {"ok": "✓", "review": "~", "fail": "✗", "forced": "⚡"}.get(result.status, "?")
+                log.info(
+                    f"[{clip_idx:3d}/{len(clips)}] {name:30s} {status_sym} {result.status.upper():7s} "
+                    f"conf={result.confidence:.3f} vobu={vobu_match/SR:.2f}s"
+                )
+
+                report.append({
+                    "index": clip_idx,
+                    "name": name,
+                    "timeline_start_tc": start_tc,
+                    "timeline_end_tc": end_tc,
+                    "timeline_start_samples": start_sample,
+                    "timeline_end_samples": end_sample,
+                    "status": result.status,
+                    "confidence": round(result.confidence, 4),
+                    "vobu_match_sec": round(vobu_match / SR, 4),
+                    "vobu_match_samples": vobu_match,
+                    "raw_ncc": round(result.raw_ncc, 4),
+                    "stability": round(result.stability, 4),
+                })
+
+                processed += 1
+
+            except Exception as e:
+                log.error(f"[{clip_idx:3d}] {name} error: {e}", exc_info=False)
+                skipped += 1
+
+        # ── Write output ─────────────────────────────────────────────────────
+
+        log.info(f"\nProcessed: {processed} | Skipped: {skipped}")
+
+        final_path = out_dir / "final.wav"
+
+        try:
+            sf.write(str(final_path), output, SR)
+            log.info(f"Final WAV: {final_path}")
+        except Exception as e:
+            log.error(f"Failed to write final.wav: {e}")
+            raise
+
+        # ── Copy to deliverables ─────────────────────────────────────────────
+
+        try:
+            deliver_final = deliver_dir / "final.wav"
+            shutil.copy2(final_path, deliver_final)
+            log.info(f"Deliverable: {deliver_final}")
+        except Exception as e:
+            log.error(f"Failed to copy final.wav to deliverables: {e}")
+            raise
+
+        # ── Write report ─────────────────────────────────────────────────────
+
+        try:
+            report_path = out_dir / "report.json"
+            with open(report_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            log.info(f"Report: {report_path}")
+        except Exception as e:
+            log.warning(f"Failed to write report: {e}")
+
+        # ── Write manifest ──────────────────────────────────────────────────
+
+        try:
+            manifest_path = out_dir / "manifest.json"
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            log.info(f"Manifest: {manifest_path}")
+        except Exception as e:
+            log.warning(f"Failed to write manifest: {e}")
+
+        # ── Generate AAF from manifest ──────────────────────────────────────
+
+        try:
+            if report:
+                aaf_out_path = out_dir / "rebuilt.aaf"
+                with aaf2.open(str(aaf_out_path), "w") as f:
+                    comp = f.create.CompositionMob("VO_REPAIR_OUTPUT")
+                    comp.usage = "Usage_TopLevel"
+                    f.content.mobs.append(comp)
+
+                    slot = comp.create_sound_slot(edit_rate=SR)
+                    seq = slot.segment
+
+                    # Import final.wav as essence once
+                    master = f.create.MasterMob("rebuilt_audio_master")
+                    f.content.mobs.append(master)
+                    essence_slot = master.import_audio_essence(str(final_path), SR)
+
+                    current_pos = 0
+
+                    for item in report:
+                        start = item["timeline_start_samples"]
+                        end = item["timeline_end_samples"]
+                        duration = end - start
+
+                        # Add filler if gap
+                        if start > current_pos:
+                            filler = f.create.Filler("sound")
+                            filler.length = start - current_pos
+                            seq.components.append(filler)
+                            current_pos = start
+
+                        # Create source clip pointing to segment of final.wav
+                        src_clip = master.create_source_clip(
+                            slot_id=essence_slot.slot_id,
+                            start=start,
+                            length=duration,
+                            media_kind="sound",
+                        )
+                        src_clip.length = duration
+                        seq.components.append(src_clip)
+                        current_pos += duration
+
+                    f.save()
+                log.info(f"AAF: {aaf_out_path}")
+                shutil.copy2(aaf_out_path, deliver_dir / aaf_out_path.name)
+        except Exception as e:
+            log.warning(f"AAF generation failed: {e}")
+
+        log.info("\n✓ DONE")
+        print(final_path)
+        print(deliver_final)
+
+    except Exception as e:
+        log.error(f"Fatal error: {e}", exc_info=True)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

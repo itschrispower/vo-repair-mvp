@@ -49,8 +49,8 @@ SILENCE_DB: float = -52.0
 WEAK_DB: float = -40.0
 
 # ── Confidence thresholds (after all penalties applied) ───────────────────────
-CONF_OK: float = 0.75
-CONF_REVIEW: float = 0.42
+CONF_OK: float = 0.72
+CONF_REVIEW: float = 0.36
 
 # ── Ambiguity ratios and counts ───────────────────────────────────────────────
 AMBIG_HARD: float = 0.92       # 2nd-best / best → hard fail of confidence
@@ -62,8 +62,8 @@ FAR_DUPLICATE_MIN_S: float = 10.0   # spatial far-duplicate threshold (seconds)
 # ── Search / refinement parameters ───────────────────────────────────────────
 TOP_K: int = 5
 FINE_HALF_S: float = 0.50          # ±s fine refinement window around each coarse peak
-DEFAULT_WINDOW_S: float = 30.0     # ±s when no prior drift anchor
-NEIGHBOUR_WINDOW_S: float = 8.0    # ±s when anchor available
+DEFAULT_WINDOW_S: float = 45.0     # ±s when no prior drift anchor
+NEIGHBOUR_WINDOW_S: float = 12.0    # ±s when anchor available
 
 # ── Edge trimming to remove fade contamination ────────────────────────────────
 EDGE_TRIM_MS: float = 25.0          # trim this many ms from each end of ref clip
@@ -71,13 +71,14 @@ EDGE_TRIM_MIN_CLIP_MS: float = 120.0  # only trim if clip is longer than this
 
 # ── Stability / peak sharpness ────────────────────────────────────────────────
 STABILITY_DELTA_MS: float = 15.0   # ±ms window around NCC peak for sharpness check
+MIN_NCC_CANDIDATE: float = 0.30    # ignore candidates below this raw NCC
 
 # ── Polarity flip minimum margin ──────────────────────────────────────────────
 POLARITY_FLIP_MIN_DELTA: float = 0.06  # inverted must beat normal by at least this much
 
 # ── DriftTracker anchor gating ────────────────────────────────────────────────
-ANCHOR_MIN_CONF: float = 0.70       # below this confidence, skip recording as anchor
-ANCHOR_WEIGHT_CONF: float = 0.80    # at this confidence, anchor weight reaches 1.0
+ANCHOR_MIN_CONF: float = 0.58       # below this confidence, skip recording as anchor
+ANCHOR_WEIGHT_CONF: float = 0.72    # at this confidence, anchor weight reaches 1.0
 DRIFT_JUMP_S: float = 3.0           # deviation > this → possible false-positive jump
 
 
@@ -353,10 +354,6 @@ def match_clip_robust(
         reasons.append(f"short clip ({dur_ms:.0f} ms)")
 
     # ── 2. Edge trimming (remove fade contamination from clip edges) ──────────
-    # Trim 25 ms from each end of the reference clip so that crossfade tails and
-    # editor fades do not corrupt the NCC. The returned offset points to the start
-    # of the trimmed clip in the region; the caller subtracts trim_samples to get
-    # the true start of the full (untrimmed) clip in the VOBU.
     trim_samples = 0
     clip_trimmed = clip
     clip_bp_trimmed = clip_bp
@@ -410,8 +407,8 @@ def match_clip_robust(
     clip_bp_inv = -clip_bp_trimmed
     stab_delta = max(1, int(STABILITY_DELTA_MS / 1000.0 * SR_FULL))
 
-    # For weak/very-short clips, lean harder on bandpass (better SNR in speech band)
-    bp_w = 0.70 if (is_weak or is_very_short) else 0.55
+    # For weak/very-short clips, lean heavily on bandpass (better SNR in speech band)
+    bp_w = 0.80 if (is_weak or is_very_short) else 0.65
     wb_w = 1.0 - bp_w
 
     fine_cands: List[MatchCandidate] = []
@@ -443,6 +440,10 @@ def match_clip_robust(
         best_i_idx = int(np.argmax(fused_i))
         score_n = float(fused_n[best_n_idx])
         score_i = float(fused_i[best_i_idx])
+
+        # REJECT weak peaks early
+        if score_n < MIN_NCC_CANDIDATE and score_i < MIN_NCC_CANDIDATE:
+            continue
 
         # Per-candidate method scores for later cross-validation
         sc_n_wb = float(ncc_wb_n[best_n_idx]) if best_n_idx < len(ncc_wb_n) else 0.0
@@ -480,7 +481,13 @@ def match_clip_robust(
         return ClipMatchResult(0, 0.0, "fail", reasons, [], 1, trim_samples=trim_samples)
 
     # ── 5. Sort, deduplicate, select best ────────────────────────────────────
-    fine_cands.sort(key=lambda c: c.ncc, reverse=True)
+    # Sort by composite score: NCC (70%) + stability (20%) + BP consistency (10%)
+    # This prefers peaks that are both high-scoring AND sharp AND consistent
+    def candidate_score(c: MatchCandidate) -> float:
+        bp_consistency = min(c.ncc_bp, c.ncc_wb) / max(c.ncc_bp, c.ncc_wb + 1e-9)
+        return 0.70 * c.ncc + 0.20 * c.stability + 0.10 * bp_consistency
+
+    fine_cands.sort(key=candidate_score, reverse=True)
 
     dedup_dist = max(1, int(0.050 * SR_FULL))      # 50 ms minimum separation
     deduped: List[MatchCandidate] = []
@@ -538,10 +545,13 @@ def match_clip_robust(
 
     # ── 7. Stability check ────────────────────────────────────────────────────
     stability = best.stability
-    stability_factor = 0.70 + 0.30 * stability
+    # Stricter penalty: flat peak → confidence heavily penalized
+    if stability < 0.40:
+        stability_factor = 0.50 + 0.50 * stability  # ranges 0.50-1.0, not 0.70-1.0
+    else:
+        stability_factor = 1.0
 
     # ── 8. Method agreement: wideband NCC vs RMS-envelope NCC ────────────────
-    # Only meaningful for clips long enough to have a reliable envelope shape.
     method_agreement = 1.0
     env_ncc_val: Optional[float] = None
 
@@ -553,14 +563,12 @@ def match_clip_robust(
             env_ncc_val = None
 
         if env_ncc_val is not None:
-            # Penalise when wideband NCC is high but envelope correlation disagrees.
-            # Threshold: allow up to 0.25 spread before penalising.
-            # At spread=0.65 the penalty caps at 0.5.
-            if best.ncc_wb > 0.50 and env_ncc_val < best.ncc_wb - 0.25:
+            # Stricter disagreement penalty: more aggressive than before
+            if best.ncc_wb > 0.45 and env_ncc_val < best.ncc_wb - 0.20:
                 spread = best.ncc_wb - env_ncc_val
                 method_agreement = float(np.clip(
-                    1.0 - (spread - 0.25) / 0.40 * 0.5,
-                    0.50, 1.0
+                    1.0 - (spread - 0.20) / 0.40 * 0.65,  # was 0.50, now 0.65
+                    0.35, 1.0  # was 0.50, now 0.35
                 ))
 
     # ── 9. Confidence scoring with all penalties applied ─────────────────────
@@ -571,14 +579,14 @@ def match_clip_robust(
         conf *= 0.25
         reasons.append("confidence penalized: silence")
     elif is_weak:
-        conf *= 0.55
+        conf *= 0.80
         reasons.append("confidence penalized: weak signal")
 
     # Duration penalties
     if is_very_short:
-        conf *= 0.50
-    elif is_short:
         conf *= 0.72
+    elif is_short:
+        conf *= 0.85
 
     # Ambiguity penalties
     if ambig_hard:
@@ -596,14 +604,14 @@ def match_clip_robust(
         conf *= 0.85
         reasons.append("polarity inversion detected")
 
-    # Peak sharpness / stability (flat peak → uncertain offset)
+    # Peak sharpness / stability (flat peak → very uncertain offset)
     if stability < 0.40:
         conf *= stability_factor
         reasons.append(
             f"flat NCC peak (stability={stability:.2f}) — alignment may be uncertain"
         )
 
-    # Method agreement (wideband vs envelope)
+    # Method agreement (wideband vs envelope) — stricter penalty
     if method_agreement < 0.90:
         conf *= method_agreement
         if env_ncc_val is not None:
@@ -614,7 +622,13 @@ def match_clip_robust(
 
     conf = float(np.clip(conf, 0.0, 1.0))
 
-    # ── 10. Status assignment ─────────────────────────────────────────────────
+    # ── 10. Minimum confidence floor ──────────────────────────────────────────
+    # If raw NCC is very low, force fail regardless of other penalties
+    if raw_ncc < 0.35 and conf < 0.50:
+        conf = 0.0
+        reasons.append("minimum confidence floor: raw NCC too low")
+
+    # ── 11. Status assignment ─────────────────────────────────────────────────
     if conf >= CONF_OK:
         status = "ok"
     elif conf >= CONF_REVIEW:
@@ -680,20 +694,22 @@ class DriftTracker:
         """
         Register a match as a confidence-weighted anchor for future estimates.
 
-        Matches with confidence < ANCHOR_MIN_CONF are silently ignored —
-        uncertain matches should not bias the drift estimate.
+        REVIEW matches with usable evidence are allowed to contribute anchors,
+        but at a lower weight than clean OK matches.
         """
         if status not in ("ok", "review"):
             return
         if confidence < ANCHOR_MIN_CONF:
-            return  # too uncertain to trust as an anchor
-        # Scale weight: ANCHOR_MIN_CONF → 0.30, ANCHOR_WEIGHT_CONF and above → 1.0
+            return
+
         t = float(np.clip(
             (confidence - ANCHOR_MIN_CONF) / max(1e-6, ANCHOR_WEIGHT_CONF - ANCHOR_MIN_CONF),
             0.0, 1.0,
         ))
-        weight = 0.30 + 0.70 * t
-        self._anchors.append((int(timeline_start), int(vobu_match), weight))
+        base_weight = 0.25 + 0.75 * t
+        if status == "review":
+            base_weight *= 0.75
+        self._anchors.append((int(timeline_start), int(vobu_match), float(base_weight)))
         if len(self._anchors) > 14:
             self._anchors = self._anchors[-14:]
 
@@ -717,17 +733,27 @@ class DriftTracker:
         """
         Return (search_lo, search_hi) in VOBU samples.
 
-        When anchors are available the window is centred on the drift-estimated
-        VOBU position.  When no anchors exist the entire VOBU is searched.
+        Window width adapts to tracker certainty:
+          - 0 anchors  → full search
+          - 1 anchor   → broad neighbourhood
+          - 2 anchors  → medium neighbourhood
+          - 3+ anchors → normal neighbourhood
         """
-        if not self._anchors:
+        n = len(self._anchors)
+        if n == 0:
             lo, hi = 0, self._vlen
         else:
             est = int(max(0, self._estimate(timeline_start)))
-            lo = max(0, est - self._neigh_half)
-            hi = min(self._vlen, est + self._neigh_half)
+            if n == 1:
+                half = max(self._neigh_half * 3, int(20.0 * self._sr))
+            elif n == 2:
+                half = max(self._neigh_half * 2, int(14.0 * self._sr))
+            else:
+                half = self._neigh_half
 
-        # Guarantee the window is at least clip_len wide
+            lo = max(0, est - half)
+            hi = min(self._vlen, est + half)
+
         if hi - lo < clip_len:
             mid = (lo + hi) // 2
             half = max(clip_len, self._neigh_half)

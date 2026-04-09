@@ -19,7 +19,7 @@ source .venv/bin/activate
 
 # ── Install / sync dependencies ───────────────────────────────────────────────
 echo "==> Checking dependencies…"
-pip install -r requirements.txt --quiet --quiet
+python3 -m pip install -r requirements.txt --quiet --quiet
 
 # ── Launch GUI ────────────────────────────────────────────────────────────────
 echo "==> Starting VO Repair…"
